@@ -7,7 +7,15 @@ import { Suspense } from "react";
 import { useUser } from "@clerk/nextjs";
 import { getPortfolio } from "@/lib/portfolioStore";
 
-export default function PortfolioSetupPageContent() {
+export default function PortfolioSetupPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-900" />}>
+      <PortfolioSetupPageContent />
+    </Suspense>
+  );
+}
+
+function PortfolioSetupPageContent() {
   const pid = useSearchParams().get("pid");
   const router = useRouter();
   const { user } = useUser();

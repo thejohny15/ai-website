@@ -1,9 +1,18 @@
 // app/portfolio/custom/page.tsx
 "use client";
+import { Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
 export default function CustomScenarioPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[var(--bg-start)]" />}>
+      <CustomScenarioPageContent />
+    </Suspense>
+  );
+}
+
+function CustomScenarioPageContent() {
   const pid = useSearchParams().get("pid");
   const router = useRouter();
   if (!pid) { if (typeof window !== "undefined") router.replace("/dashboard"); return null; }

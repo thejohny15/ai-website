@@ -1,7 +1,7 @@
 // app/portfolio/path/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useUser } from "@clerk/nextjs";
@@ -39,6 +39,14 @@ export type Scenario = {
 };
 
 export default function PathPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[var(--bg-start)]" />}>
+      <PathPageContent />
+    </Suspense>
+  );
+}
+
+function PathPageContent() {
   const pid = useSearchParams().get("pid");
   const router = useRouter();
   const { user, isLoaded } = useUser();
