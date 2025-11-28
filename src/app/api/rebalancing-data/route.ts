@@ -12,17 +12,52 @@ import { runBacktest } from "@/lib/backtest";
 
 export async function POST(req: NextRequest) {
   try {
-    const { symbols, startDate, endDate, weights } = await req.json();
+    const { symbols, startDate, endDate, weights, lookbackPeriodYears } = await req.json();
+    const normalizedLookbackYears =
+      typeof lookbackPeriodYears === 'number' && lookbackPeriodYears > 0
+        ? lookbackPeriodYears
+        : 5;
     
     console.log('=== REBALANCING DATA API CALLED ===');
     console.log('Symbols:', symbols);
     console.log('Weights:', weights);
     console.log('Period:', startDate, 'to', endDate);
+
+    const MS_IN_DAY = 24 * 60 * 60 * 1000;
+    const MIN_SECONDS = 24 * 60 * 60;
+    const creationDate = new Date(startDate);
+    const requestedEnd = new Date(endDate);
+    const historicalStart = new Date(creationDate);
+    historicalStart.setFullYear(historicalStart.getFullYear() - normalizedLookbackYears);
+
+    // Guard against invalid ranges (e.g. portfolio just created this second)
+    if (requestedEnd.getTime() <= creationDate.getTime()) {
+      requestedEnd.setTime(creationDate.getTime() + MS_IN_DAY);
+    }
+
+    const period1 = Math.floor(historicalStart.getTime() / 1000);
+    const rawPeriod2 = Math.floor(requestedEnd.getTime() / 1000);
+    const period2 = Math.max(rawPeriod2, period1 + MIN_SECONDS);
+
+    const insufficientHistoryResponse = (message: string) =>
+      NextResponse.json(
+        {
+          rebalancingData: [],
+          portfolioValues: [],
+          dates: [],
+          mostRecentDate: null,
+          initialDate: startDate,
+          initialPrices: {},
+          todaysPrices: {},
+          currentRiskContributions: {},
+          insufficientHistory: true,
+          message,
+        },
+        { status: 200 }
+      );
     
     // STEP 1: Fetch historical daily prices and dividends from Yahoo Finance
     const historicalDataPromises = symbols.map(async (symbol: string) => {
-      const period1 = Math.floor(new Date(startDate).getTime() / 1000);
-      const period2 = Math.floor(new Date(endDate).getTime() / 1000);
       const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d&events=div`;
       
       const response = await fetch(url, {
@@ -101,21 +136,25 @@ export async function POST(req: NextRequest) {
     
     // Validate we have data for all symbols
     if (commonDates.length === 0) {
-      return NextResponse.json(
-        { error: 'No overlapping dates found between assets. Try a different date range.' },
-        { status: 400 }
+      return insufficientHistoryResponse(
+        'Not enough market data is available between the portfolio creation date and today. Try again after the next market close.'
       );
     }
     
     for (const symbol of symbols) {
       const prices = pricesMap.get(symbol);
       if (!prices || prices.length === 0) {
-        return NextResponse.json(
-          { error: `No price data available for ${symbol} in the specified date range` },
-          { status: 400 }
+        return insufficientHistoryResponse(
+          `No price data available for ${symbol} in the specified date range. This could happen if the asset is newly listed.`
         );
       }
     }
+    
+    const creationDateISO = creationDate.toISOString().split('T')[0];
+    const sliceStartIdx = Math.max(
+      0,
+      commonDates.findIndex(date => date >= creationDateISO)
+    );
     
     // STEP 3: Run backtest with fixed weights (SAME as risk-budgeting page)
     const targetWeights = weights.map((w: number) => w / 100);
@@ -128,7 +167,12 @@ export async function POST(req: NextRequest) {
       symbols,
       { frequency: 'quarterly', transactionCost: 0.001 },
       10000,
-      true  // Always reinvest dividends (tracks shadow portfolio internally)
+      true,
+      undefined,
+      normalizedLookbackYears,
+      false,
+      "erc",
+      sliceStartIdx
     );
     
     console.log('Backtest completed');
@@ -172,22 +216,28 @@ export async function POST(req: NextRequest) {
         : undefined,
     })) || [];
 
-    // STEP 5: Get today's data (most recent trading day)
+    // STEP 5: Capture initial and most recent price snapshots
     const mostRecentDate = commonDates[commonDates.length - 1];
     const todaysPrices: Record<string, number> = {};
+    const initialPrices: Record<string, number> = {};
     symbols.forEach((symbol: string) => {
       const prices = pricesMap.get(symbol);
       if (prices && prices.length > 0) {
         todaysPrices[symbol] = prices[prices.length - 1];
+        const initIdx = Math.min(Math.max(sliceStartIdx, 0), prices.length - 1);
+        initialPrices[symbol] = prices[initIdx];
       }
     });
 
     return NextResponse.json({
       rebalancingData,
       portfolioValues: backtest.portfolioValues,
-      dates: commonDates,
+      dates: backtest.dates,
       mostRecentDate,
+      initialDate: commonDates[Math.min(sliceStartIdx, commonDates.length - 1)],
+      initialPrices,
       todaysPrices, // Today's closing prices for drift calculation
+      currentRiskContributions: backtest.currentRiskContributions || {},
     });
     
   } catch (error: any) {

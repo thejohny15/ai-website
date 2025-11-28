@@ -4,8 +4,14 @@ import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useState, Suspense } from "react";
 import { useUser } from "@clerk/nextjs";
-import { updatePortfolio, getPortfolio } from "@/lib/portfolioStore";
-import { CHART_COLORS, InfoIcon, SectionCard, StrategyCard, InfoBox } from "@/components/ui/portfolio-components";
+import { updatePortfolio } from "@/lib/portfolioStore";
+import { CHART_COLORS, SectionCard, StrategyCard, InfoBox } from "@/components/ui/portfolio-components";
+import { MetricCard } from "@/components/portfolio/MetricCard";
+import { PerformanceChart } from "@/components/portfolio/charts/PerformanceChart";
+import { RiskContributionChart } from "@/components/portfolio/charts/RiskContributionChart";
+import { AllocationPieChart } from "@/components/portfolio/charts/AllocationPieChart";
+import { generatePortfolioPDF } from "@/components/portfolio/PDFGenerator";
+
 
 function RiskBudgetingPageContent() {
   const pid = useSearchParams().get("pid");
@@ -41,31 +47,14 @@ function RiskBudgetingPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<any>(null);
   const [saving, setSaving] = useState(false);
-  const [useCustomBudgets, setUseCustomBudgets] = useState(false);
-  const [customBudgets, setCustomBudgets] = useState<Record<string, number>>({});
-  const [targetVolatility, setTargetVolatility] = useState<number | null>(null);
-  const [useVolatilityTarget, setUseVolatilityTarget] = useState(false);
-  const [lookbackPeriod, setLookbackPeriod] = useState<'3m' | '1y' | '3y' | '5y'>('5y');
+  const [lookbackPeriod, setLookbackPeriod] = useState< '1y' | '3y' | '5y'>('5y');
   const [includeDividends, setIncludeDividends] = useState(true);
+  const [optimizer, setOptimizer] = useState<"erc" | "es">("erc"); // NEW: optimization mode (ERC / ES)
 
   function toggleAsset(id: string) {
     setAssetClasses(prev =>
       prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a)
     );
-  }
-
-  function updateCustomBudget(id: string, value: number) {
-    setCustomBudgets(prev => ({ ...prev, [id]: value }));
-  }
-
-  function distributeEvenly() {
-    const enabled = assetClasses.filter(a => a.enabled);
-    const equalBudget = 100 / enabled.length;
-    const newBudgets: Record<string, number> = {};
-    enabled.forEach(a => {
-      newBudgets[a.id] = parseFloat(equalBudget.toFixed(2));
-    });
-    setCustomBudgets(newBudgets);
   }
 
   async function handleGenerate() {
@@ -81,34 +70,19 @@ function RiskBudgetingPageContent() {
       return;
     }
 
-    // Validate custom budgets if enabled
-    if (useCustomBudgets) {
-      const budgetSum = enabled.reduce((sum, a) => sum + (customBudgets[a.id] || 0), 0);
-      if (Math.abs(budgetSum - 100) > 0.01) {
-        setError(`Risk budgets must sum to 100%. Current sum: ${budgetSum.toFixed(2)}%`);
-        return;
-      }
-    }
-
     try {
       setLoading(true);
       
       const payload = { 
         assetClasses: enabled.map(a => ({ ticker: a.ticker, name: a.name })),
-        customBudgets: useCustomBudgets 
-          ? enabled.map(a => customBudgets[a.id] || 0)
-          : undefined,
-        targetVolatility: useVolatilityTarget && targetVolatility 
-          ? targetVolatility / 100 // Convert to decimal
-          : undefined,
         lookbackPeriod: lookbackPeriod,
-        includeDividends: includeDividends
+        includeDividends: includeDividends,
       };
-      
+
       console.log("Calling API with payload:", payload);
-      
-      // Call the risk budgeting API
-      const res = await fetch("/api/risk-budgeting", {
+
+      // pass optimizer to API
+      const res = await fetch(`/api/risk-budgeting?optimizer=${optimizer}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -161,7 +135,9 @@ function RiskBudgetingPageContent() {
 
       // Create a summary object with risk budgeting details
       const summary = {
-        methodology: useCustomBudgets ? "Custom Risk Budgeting" : "Equal Risk Contribution (ERC)",
+        methodology: optimizer === "es"
+          ? "Expected Shortfall Risk Budgeting (ES)"
+          : "Equal Risk Contribution (ERC)",
         portfolioVolatility: `${results.metrics.portfolioVolatility}%`,
         sharpeRatio: results.metrics.sharpeRatio,
         expectedReturn: `${results.metrics.expectedReturn}%`,
@@ -172,7 +148,6 @@ function RiskBudgetingPageContent() {
           converged: results.optimization?.converged,
           iterations: results.optimization?.iterations,
         },
-        customBudgets: useCustomBudgets ? customBudgets : undefined,
         volatilityTargeting: results.volatilityTargeting || undefined,
         correlationMatrix: results.correlationMatrix || undefined,
         avgCorrelation: results.avgCorrelation || undefined,
@@ -193,6 +168,7 @@ function RiskBudgetingPageContent() {
         dividendCashIfReinvested: results.analytics.backtest.dividendCashIfReinvested,
         shadowPortfolioValue: results.analytics.backtest.shadowPortfolioValue,
         shadowTotalReturn: results.analytics.backtest.shadowTotalReturn,
+        currentRiskContributions: results.analytics.backtest.currentRiskContributions,
       } : undefined;
 
       console.log('Backtest results to save:', backtestResults);
@@ -239,6 +215,40 @@ function RiskBudgetingPageContent() {
           Institutional-grade multi-asset allocation using quantitative risk management
         </p>
 
+        {/* NEW: Optimizer selector – ERC vs ES, placed near top of full-analysis page */}
+        <div className="mt-4 mb-4 flex flex-wrap items-center gap-3">
+          <span className="text-sm font-semibold text-slate-200">Optimizer</span>
+          <div className="inline-flex rounded-lg bg-slate-900/70 border border-slate-600/70 overflow-hidden text-sm">
+            <button
+              type="button"
+              onClick={() => setOptimizer("erc")}
+              className={`px-3 py-1.5 ${
+                optimizer === "erc"
+                  ? "bg-emerald-500 text-white font-semibold"
+                  : "text-slate-200 hover:bg-slate-700/60"
+              }`}
+            >
+              ERC
+            </button>
+            <button
+              type="button"
+              onClick={() => setOptimizer("es")}
+              className={`px-3 py-1.5 border-l border-slate-700 ${
+                optimizer === "es"
+                  ? "bg-fuchsia-500 text-white font-semibold"
+                  : "text-slate-200 hover:bg-slate-700/60"
+              }`}
+            >
+              ES
+            </button>
+          </div>
+          <span className="text-xs text-slate-400">
+            {optimizer === "erc"
+              ? "Equal Risk Contribution optimization."
+              : "Expected Shortfall–based risk budgeting."}
+          </span>
+        </div>
+
         {/* Quick Strategy Presets */}
         <SectionCard className="mt-8">
           <h2 className="text-xl font-bold mb-5 text-white">Quick Start: Choose a Strategy</h2>
@@ -259,7 +269,6 @@ function RiskBudgetingPageContent() {
                   ...a,
                   enabled: ['sovereign', 'treasury-short', 'corporate', 'tips'].includes(a.id)
                 })));
-                setUseVolatilityTarget(false);
               }}
             />
             <StrategyCard
@@ -278,7 +287,6 @@ function RiskBudgetingPageContent() {
                   ...a,
                   enabled: ['equities', 'corporate', 'sovereign', 'commodities'].includes(a.id)
                 })));
-                setUseVolatilityTarget(false);
               }}
             />
             <StrategyCard
@@ -297,27 +305,10 @@ function RiskBudgetingPageContent() {
                   ...a,
                   enabled: ['equities', 'smallcap', 'intl', 'reits', 'commodities'].includes(a.id)
                 })));
-                setUseVolatilityTarget(false);
               }}
             />
           </div>
         </SectionCard>
-
-        {/* Strategy Summary Badge */}
-        {(useCustomBudgets || useVolatilityTarget) && (
-          <div className="mt-4 inline-flex flex-wrap gap-2">
-            {useCustomBudgets && (
-              <span className="px-3 py-1 rounded-full bg-blue-500/20 text-blue-200 border border-blue-500/30 text-sm font-medium">
-                🎯 Custom Risk Budgets
-              </span>
-            )}
-            {useVolatilityTarget && targetVolatility && (
-              <span className="px-3 py-1 rounded-full bg-purple-500/20 text-purple-200 border border-purple-500/30 text-sm font-medium">
-                📊 Target Vol: {targetVolatility}%
-              </span>
-            )}
-          </div>
-        )}
 
         {/* Asset Class Selection */}
         <SectionCard className="mt-8">
@@ -426,7 +417,7 @@ function RiskBudgetingPageContent() {
           </InfoBox>
         </SectionCard>
 
-        {/* Volatility Targeting Section */}
+        {/* Analysis Time Period */}
         <div className="mt-6 rounded-2xl border border-slate-600/50 bg-slate-800/60 p-6 backdrop-blur-xl shadow-2xl">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -470,280 +461,66 @@ function RiskBudgetingPageContent() {
           </InfoBox>
         </div>
 
-        {/* Volatility Targeting Section */}
-        <div className="mt-6 rounded-2xl border border-slate-600/50 bg-slate-800/60 p-6 backdrop-blur-xl shadow-2xl">
+        {/* Risk Model */}
+        <div className="mt-6 rounded-2xl border border-slate-600/40 bg-slate-800/40 p-6 backdrop-blur-xl shadow-2xl">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-xl font-bold text-white">Volatility Target</h2>
+              <h2 className="text-xl font-bold text-white">Risk Model</h2>
               <p className="text-sm text-slate-200 mt-1">
-                {useVolatilityTarget 
-                  ? "Portfolio will be scaled to achieve your target volatility level"
-                  : "Portfolio uses natural volatility from optimization (default)"}
+                Select how portfolio risk is defined and allocated.
               </p>
             </div>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <span className="text-sm text-slate-200">Target Vol</span>
-              <input
-                type="checkbox"
-                checked={useVolatilityTarget}
-                onChange={(e) => {
-                  setUseVolatilityTarget(e.target.checked);
-                  if (e.target.checked && !targetVolatility) {
-                    setTargetVolatility(10); // Default to 10% volatility
-                  }
-                }}
-                className="h-5 w-5 rounded"
-              />
-            </label>
           </div>
 
-          {useVolatilityTarget && (
-            <div className="space-y-4">
-              <div className="rounded-xl border border-slate-500/30 bg-slate-700/30 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-semibold text-white">Target Annual Volatility</span>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min="1"
-                      max="50"
-                      step="0.5"
-                      value={targetVolatility || 10}
-                      onChange={(e) => setTargetVolatility(parseFloat(e.target.value) || 10)}
-                      className="w-20 rounded-lg border border-slate-400 bg-white text-slate-900 px-2 py-1 text-right outline-none focus:ring-2 focus:ring-emerald-400"
-                    />
-                    <span className="text-slate-200">%</span>
-                  </div>
-                </div>
-                
-                {/* Volatility slider */}
-                <input
-                  type="range"
-                  min="1"
-                  max="50"
-                  step="0.5"
-                  value={targetVolatility || 10}
-                  onChange={(e) => setTargetVolatility(parseFloat(e.target.value))}
-                  className="w-full h-2 rounded-lg appearance-none cursor-pointer bg-white/20"
-                  style={{
-                    background: `linear-gradient(to right, #10b981 0%, #10b981 ${((targetVolatility || 10) / 50) * 100}%, rgba(255,255,255,0.2) ${((targetVolatility || 10) / 50) * 100}%, rgba(255,255,255,0.2) 100%)`
-                  }}
-                />
-                
-                {/* Volatility guidance */}
-                <div className="mt-3 grid grid-cols-4 gap-2 text-xs text-white/70">
-                  <div className="text-center">
-                    <div className="font-semibold text-emerald-300">5-8%</div>
-                    <div>Conservative</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="font-semibold text-blue-300">8-12%</div>
-                    <div>Moderate</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="font-semibold text-amber-300">12-18%</div>
-                    <div>Growth</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="font-semibold text-rose-300">18%+</div>
-                    <div>Aggressive</div>
-                  </div>
-                </div>
-              </div>
-
-              <InfoBox variant="blue">
-                <p>
-                  Volatility targeting scales portfolio exposure (via leverage or cash) to achieve your desired volatility level. 
-                  The risk budgeting remains unchanged, but position sizes are adjusted proportionally.
-                </p>
-              </InfoBox>
-            </div>
-          )}
-        </div>
-
-        {/* Custom Risk Budgets Section */}
-        <div className="mt-6 rounded-2xl border border-slate-600/50 bg-slate-800/60 p-6 backdrop-blur-xl shadow-2xl">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-xl font-bold text-white">Risk Budget Allocation</h2>
-              <p className="text-sm text-slate-200 mt-1">
-                {useCustomBudgets 
-                  ? "Specify how much risk each asset should contribute (must sum to 100%)"
-                  : "Using equal risk contribution (default)"}
-              </p>
-            </div>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <span className="text-sm text-slate-200">Custom</span>
-              <input
-                type="checkbox"
-                checked={useCustomBudgets}
-                onChange={(e) => {
-                  setUseCustomBudgets(e.target.checked);
-                  if (e.target.checked) {
-                    distributeEvenly(); // Initialize with equal budgets
-                  }
-                }}
-                className="h-5 w-5 rounded"
-              />
-            </label>
-          </div>
-
-          {useCustomBudgets && (
-            <div className="space-y-4">
-              {/* Budget inputs */}
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {assetClasses
-                  .filter(a => a.enabled)
-                  .map((asset) => {
-                    const budget = customBudgets[asset.id] || 0;
-                    return (
-                      <div key={asset.id} className="rounded-xl border border-white/20 bg-white/5 p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="font-semibold text-sm">{asset.ticker}</span>
-                          <input
-                            type="number"
-                            min="0"
-                            max="100"
-                            step="0.1"
-                            value={budget}
-                            onChange={(e) => updateCustomBudget(asset.id, parseFloat(e.target.value) || 0)}
-                            className="w-20 rounded-lg border border-white/30 bg-white/90 text-[var(--bg-end)] px-2 py-1 text-sm text-right outline-none focus:ring-2 focus:ring-white/30"
-                          />
-                          <span className="text-sm text-white/70">%</span>
-                        </div>
-                        {/* Visual bar */}
-                        <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-blue-400 transition-all"
-                            style={{ width: `${Math.min(budget, 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-
-              {/* Sum indicator */}
-              <div className="flex items-center justify-between rounded-xl border border-white/20 bg-white/5 p-4">
-                <span className="font-semibold">Total Risk Budget</span>
-                <div className="flex items-center gap-2">
-                  <span className={`text-lg font-bold ${
-                    Math.abs(assetClasses.filter(a => a.enabled).reduce((sum, a) => sum + (customBudgets[a.id] || 0), 0) - 100) < 0.01
-                      ? "text-emerald-300"
-                      : "text-amber-300"
-                  }`}>
-                    {assetClasses.filter(a => a.enabled).reduce((sum, a) => sum + (customBudgets[a.id] || 0), 0).toFixed(2)}%
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setOptimizer("erc")}
+              className={`w-full rounded-xl border p-4 text-left transition ${
+                optimizer === "erc"
+                  ? "border-green-500 bg-green-900/30 text-white"
+                  : "border-slate-600 text-slate-300 bg-slate-900/40 hover:bg-slate-800/60"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-semibold">ERC (Equal Risk Contribution)</span>
+                {optimizer === "erc" && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-100">
+                    Active
                   </span>
-                  {Math.abs(assetClasses.filter(a => a.enabled).reduce((sum, a) => sum + (customBudgets[a.id] || 0), 0) - 100) < 0.01 ? (
-                    <svg className="w-5 h-5 text-emerald-300" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                    </svg>
-                  ) : (
-                    <svg className="w-5 h-5 text-amber-300" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                    </svg>
-                  )}
-                </div>
+                )}
               </div>
+              <p className="text-xs text-slate-200">
+                Balances volatility evenly across assets.
+              </p>
+            </button>
 
-              {/* Quick presets */}
-              <div className="space-y-2">
-                <div className="text-xs font-semibold text-white uppercase tracking-wide">
-                  Preset Strategies
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={distributeEvenly}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-slate-700/50 border border-slate-600/50 hover:bg-slate-600/60 transition"
-                  >
-                    📊 Equal (Default)
-                  </button>
-                  <button
-                    onClick={() => {
-                      const enabled = assetClasses.filter(a => a.enabled);
-                      const newBudgets: Record<string, number> = {};
-                      // Conservative: Low equity risk, high bonds
-                      enabled.forEach(a => {
-                        if (a.category === "Equity") newBudgets[a.id] = 20;
-                        else if (a.category === "Fixed Income") newBudgets[a.id] = 70;
-                        else newBudgets[a.id] = 10;
-                      });
-                      const sum = Object.values(newBudgets).reduce((s, v) => s + v, 0);
-                      Object.keys(newBudgets).forEach(k => {
-                        newBudgets[k] = parseFloat(((newBudgets[k] / sum) * 100).toFixed(2));
-                      });
-                      setCustomBudgets(newBudgets);
-                    }}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-slate-700/50 border border-slate-600/50 hover:bg-slate-600/60 transition"
-                  >
-                    🛡️ Conservative Pension
-                  </button>
-                  <button
-                    onClick={() => {
-                      const enabled = assetClasses.filter(a => a.enabled);
-                      const newBudgets: Record<string, number> = {};
-                      enabled.forEach(a => {
-                        if (a.category === "Equity") newBudgets[a.id] = 40;
-                        else if (a.category === "Fixed Income") newBudgets[a.id] = 40;
-                        else newBudgets[a.id] = 20;
-                      });
-                      const sum = Object.values(newBudgets).reduce((s, v) => s + v, 0);
-                      Object.keys(newBudgets).forEach(k => {
-                        newBudgets[k] = parseFloat(((newBudgets[k] / sum) * 100).toFixed(2));
-                      });
-                      setCustomBudgets(newBudgets);
-                    }}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-slate-700/50 border border-slate-600/50 hover:bg-slate-600/60 transition"
-                  >
-                    ⚖️ Balanced (60/40)
-                  </button>
-                  <button
-                    onClick={() => {
-                      const enabled = assetClasses.filter(a => a.enabled);
-                      const newBudgets: Record<string, number> = {};
-                      // All-Weather: Diversified across all risk factors
-                      enabled.forEach(a => {
-                        if (a.id === "equities") newBudgets[a.id] = 30;
-                        else if (a.id === "treasury-long" || a.id === "sovereign") newBudgets[a.id] = 40;
-                        else if (a.id === "commodities") newBudgets[a.id] = 15;
-                        else if (a.id === "gold") newBudgets[a.id] = 15;
-                        else if (a.category === "Equity") newBudgets[a.id] = 30;
-                        else if (a.category === "Fixed Income") newBudgets[a.id] = 40;
-                        else newBudgets[a.id] = 15;
-                      });
-                      const sum = Object.values(newBudgets).reduce((s, v) => s + v, 0);
-                      Object.keys(newBudgets).forEach(k => {
-                        newBudgets[k] = parseFloat(((newBudgets[k] / sum) * 100).toFixed(2));
-                      });
-                      setCustomBudgets(newBudgets);
-                    }}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-slate-700/50 border border-slate-600/50 hover:bg-slate-600/60 transition"
-                  >
-                    🌍 All-Weather
-                  </button>
-                  <button
-                    onClick={() => {
-                      const enabled = assetClasses.filter(a => a.enabled);
-                      const newBudgets: Record<string, number> = {};
-                      enabled.forEach(a => {
-                        if (a.category === "Equity") newBudgets[a.id] = 60;
-                        else if (a.category === "Fixed Income") newBudgets[a.id] = 25;
-                        else newBudgets[a.id] = 15;
-                      });
-                      const sum = Object.values(newBudgets).reduce((s, v) => s + v, 0);
-                      Object.keys(newBudgets).forEach(k => {
-                        newBudgets[k] = parseFloat(((newBudgets[k] / sum) * 100).toFixed(2));
-                      });
-                      setCustomBudgets(newBudgets);
-                    }}
-                    className="text-sm px-3 py-1.5 rounded-lg bg-slate-700/50 border border-slate-600/50 hover:bg-slate-600/60 transition"
-                  >
-                    🚀 Aggressive Growth
-                  </button>
-                </div>
+            <button
+              type="button"
+              onClick={() => setOptimizer("es")}
+              className={`w-full rounded-xl border p-4 text-left transition ${
+                optimizer === "es"
+                  ? "border-green-500 bg-green-900/30 text-white"
+                  : "border-slate-600 text-slate-300 bg-slate-900/40 hover:bg-slate-800/60"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-semibold">ES (Expected Shortfall)</span>
+                {optimizer === "es" && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-100">
+                    Active
+                  </span>
+                )}
               </div>
-            </div>
-          )}
+              <p className="text-xs text-slate-200">
+                Focuses on minimizing losses in the worst 5 % of outcomes.
+              </p>
+            </button>
+          </div>
+
+          <p className="mt-4 text-xs text-slate-300">
+            Tip: ES captures tail risk, while ERC equalizes volatility exposure. Use ES for stress-testing portfolios.
+          </p>
         </div>
 
         {/* Generate Button */}
@@ -767,7 +544,7 @@ function RiskBudgetingPageContent() {
             <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-white/30 border-t-white mb-4"></div>
             <h3 className="text-lg font-semibold mb-2">Optimizing Portfolio...</h3>
             <p className="text-sm text-white/80">
-              Fetching 5 years of historical data and calculating Equal Risk Contribution allocation
+              Fetching historical data and calculating risk-balanced allocation
             </p>
           </div>
         )}
@@ -790,42 +567,6 @@ function RiskBudgetingPageContent() {
               </div>
             </div>
 
-            {/* Volatility Targeting Info */}
-            {results.volatilityTargeting && (
-              <div className="rounded-2xl border border-purple-300/30 bg-purple-500/10 p-5 backdrop-blur">
-                <div className="flex items-start gap-3">
-                  <div className="text-purple-300 mt-0.5">
-                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
-                    </svg>
-                  </div>
-                  <div className="flex-1">
-                    <h3 className="font-semibold text-purple-200 mb-2">Volatility Targeting Active</h3>
-                    <div className="grid gap-2 text-sm text-purple-100">
-                      <div className="flex justify-between">
-                        <span>Natural Portfolio Volatility:</span>
-                        <span className="font-semibold">{results.volatilityTargeting.naturalVolatility}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Target Volatility:</span>
-                        <span className="font-semibold text-purple-200">{results.volatilityTargeting.targetVolatility}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Scaling Factor:</span>
-                        <span className="font-semibold">{results.volatilityTargeting.scalingFactor}x</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Position Sizing:</span>
-                        <span className="font-semibold">{results.volatilityTargeting.leverage}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-
-
             {/* Allocation Table */}
             <div className="rounded-2xl border border-white/20 bg-white/10 p-6 backdrop-blur">
               <div className="flex items-center justify-between mb-4">
@@ -840,7 +581,7 @@ function RiskBudgetingPageContent() {
                 <div className="flex items-start gap-3">
                   <div className="text-blue-300 mt-0.5">
                     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zm-4 4a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
                     </svg>
                   </div>
                   <div className="flex-1 text-sm text-blue-100">
@@ -902,11 +643,8 @@ function RiskBudgetingPageContent() {
                   </div>
                   <div className="flex-1">
                     <p className="text-sm text-emerald-200">
-                      <strong>{useCustomBudgets ? "Custom Risk Budget achieved:" : "Equal Risk Contribution achieved:"}</strong>{" "}
-                      {useCustomBudgets 
-                        ? "Each asset contributes to portfolio risk according to your specified targets, optimizing weights to achieve the desired risk profile."
-                        : `Each asset contributes equally (${(100 / results.weights.length).toFixed(2)}% ± 0.5%) to total portfolio risk, maximizing diversification while respecting each asset's risk characteristics.`
-                      }
+                      <strong>Equal Risk Contribution achieved:</strong>{" "}
+                      Each asset contributes equally ({(100 / results.weights.length).toFixed(2)}% ± 0.5%) to total portfolio risk, maximizing diversification while respecting each asset&apos;s risk characteristics.
                     </p>
                   </div>
                 </div>
@@ -1097,62 +835,104 @@ function RiskBudgetingPageContent() {
                         Each rebalance incurred 0.1% transaction costs.
                       </p>
                       <div className="max-h-60 overflow-y-auto space-y-2">
-                        {results.analytics.backtest.rebalanceDates.map((rebalance: any, idx: number) => (
-                          <div key={idx} className="rounded-lg bg-white/5 border border-white/10 p-3">
-                            <div className="flex items-center justify-between mb-3">
-                              <span className="text-sm font-semibold">
-                                Rebalance #{idx + 1} - {rebalance.date}
-                              </span>
-                              <span className="text-xs text-white/60">
-                                Portfolio: ${rebalance.portfolioValue}
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-3 gap-4">
-                              {/* Column 1 & 2: Weight Changes */}
-                              <div className="col-span-2 grid grid-cols-2 gap-x-4 gap-y-1">
-                                {rebalance.changes && rebalance.changes.map((change: any, i: number) => (
-                                  <div key={i} className="flex items-center gap-1.5 text-xs">
-                                    <span className="text-white/70 font-medium min-w-[45px]">{change.ticker}:</span>
-                                    <span className="text-white/90">
-                                      {change.beforeWeight}% → {change.afterWeight}%
-                                    </span>
-                                    <span className={`text-xs font-bold ${
-                                      parseFloat(change.drift) > 0 ? 'text-emerald-400' : 'text-red-400'
-                                    }`}>
-                                      ({parseFloat(change.drift) > 0 ? '+' : ''}{change.drift}%)
-                                    </span>
-                                  </div>
-                                ))}
+                        {results.analytics.backtest.rebalanceDates.map((rebalance: any, idx: number) => {
+                          // Calculate total rebalancing magnitude
+                          const totalRebalanceMagnitude = rebalance.changes?.reduce((sum: number, change: any) => {
+                            const allocationChange = Math.abs(parseFloat(change.afterWeight) - parseFloat(change.beforeWeight));
+                            return sum + allocationChange;
+                          }, 0) || 0;
+
+                          // Calculate trading volume in dollars (half of rebalance magnitude applied to portfolio value)
+                          const portfolioValue = typeof rebalance.portfolioValue === 'string' 
+                            ? parseFloat(rebalance.portfolioValue.replace(/,/g, ''))
+                            : rebalance.portfolioValue;
+                          const tradingVolumeDollars = (totalRebalanceMagnitude / 2 / 100) * portfolioValue;
+                          
+                          // Calculate transaction costs in dollars (0.1% of trading volume)
+                          const transactionCostDollars = tradingVolumeDollars * 0.001;
+
+                          return (
+                            <div key={idx} className="rounded-lg bg-white/5 border border-white/10 p-3">
+                              <div className="flex items-center justify-between mb-3">
+                                <span className="text-sm font-semibold">
+                                  Rebalance #{idx + 1} - {rebalance.date}
+                                </span>
+                                <span className="text-xs text-white/60">
+                                  Portfolio: ${rebalance.portfolioValue}
+                                </span>
                               </div>
-                              
-                              {/* Column 3: Portfolio Metrics */}
-                              <div className="border-l border-white/20 pl-4 space-y-1">
-                                {rebalance.quarterlyReturn !== undefined && (
-                                  <div className="text-xs">
-                                    <span className="text-white/60">Qtr Return:</span>{' '}
-                                    <span className={`font-semibold ${
-                                      parseFloat(rebalance.quarterlyReturn) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                                    }`}>
-                                      {parseFloat(rebalance.quarterlyReturn) > 0 ? '+' : ''}{rebalance.quarterlyReturn}%
-                                    </span>
+                              <div className="grid grid-cols-5 gap-4">
+                                {/* Column 1-3: Weight Changes */}
+                                <div className="col-span-3 grid grid-cols-2 gap-x-4 gap-y-1">
+                                  {rebalance.changes && rebalance.changes.map((change: any, i: number) => {
+                                    const beforeWeight = parseFloat(change.beforeWeight);
+                                    const afterWeight = parseFloat(change.afterWeight);
+                                    const allocationChange = afterWeight - beforeWeight;
+                                    
+                                    return (
+                                      <div key={i} className="flex items-center gap-1.5 text-xs">
+                                        <span className="text-white/70 font-medium min-w-[45px]">{change.ticker}:</span>
+                                        <span className="text-white/90">
+                                          {change.beforeWeight}% → {change.afterWeight}%
+                                        </span>
+                                        <span className={`text-xs font-bold ${
+                                          allocationChange > 0 ? 'text-emerald-400' : allocationChange < 0 ? 'text-red-400' : 'text-slate-400'
+                                        }`}>
+                                          ({allocationChange > 0 ? '+' : ''}{allocationChange.toFixed(2)}%)
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                
+                                {/* Column 4-5: Portfolio Metrics - Two columns */}
+                                <div className="col-span-2 border-l border-white/20 pl-4 grid grid-cols-2 gap-x-4 gap-y-1">
+                                  {/* Left Column */}
+                                  <div className="space-y-1">
+                                    {rebalance.volatility && (
+                                      <div className="text-xs">
+                                        <span className="text-white/60">Vol:</span>{' '}
+                                        <span className="text-white/90 font-semibold">{rebalance.volatility}%</span>
+                                      </div>
+                                    )}
+                                    {rebalance.sharpe && (
+                                      <div className="text-xs">
+                                        <span className="text-white/60">Sharpe:</span>{' '}
+                                        <span className="text-white/90 font-semibold">{rebalance.sharpe}</span>
+                                      </div>
+                                    )}
+                                    <div className="text-xs">
+                                      <span className="text-white/60">Total Rebalancing:</span>{' '}
+                                      <span className="text-white/90 font-semibold">{totalRebalanceMagnitude.toFixed(2)}%</span>
+                                    </div>
                                   </div>
-                                )}
-                                {rebalance.volatility && (
-                                  <div className="text-xs">
-                                    <span className="text-white/60">Vol:</span>{' '}
-                                    <span className="text-white/90 font-semibold">{rebalance.volatility}%</span>
+                                  
+                                  {/* Right Column */}
+                                  <div className="space-y-1">
+                                    {rebalance.quarterlyReturn !== undefined && (
+                                      <div className="text-xs">
+                                        <span className="text-white/60">Qtr Return:</span>{' '}
+                                        <span className={`font-semibold ${
+                                          parseFloat(rebalance.quarterlyReturn) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                                        }`}>
+                                          {parseFloat(rebalance.quarterlyReturn) > 0 ? '+' : ''}{rebalance.quarterlyReturn}%
+                                        </span>
+                                      </div>
+                                    )}
+                                    <div className="text-xs">
+                                      <span className="text-white/60">Trading Volume:</span>{' '}
+                                      <span className="text-white/90 font-semibold">${tradingVolumeDollars.toFixed(2)}</span>
+                                    </div>
+                                    <div className="text-xs">
+                                      <span className="text-white/60">Transaction Costs:</span>{' '}
+                                      <span className="text-white/90 font-semibold">${transactionCostDollars.toFixed(2)}</span>
+                                    </div>
                                   </div>
-                                )}
-                                {rebalance.sharpe && (
-                                  <div className="text-xs">
-                                    <span className="text-white/60">Sharpe:</span>{' '}
-                                    <span className="text-white/90 font-semibold">{rebalance.sharpe}</span>
-                                  </div>
-                                )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1305,21 +1085,19 @@ function RiskBudgetingPageContent() {
               >
                 {saving ? "Saving..." : "Save to Dashboard"}
               </button>
-              {results.analytics && (
+              {results.analytics?.backtest && (
                 <button
-                  onClick={() => {
-                    const reportData = JSON.stringify(results, null, 2);
-                    const blob = new Blob([reportData], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `risk-budgeting-report-${new Date().toISOString().split('T')[0]}.json`;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                  onClick={async () => {
+                    try {
+                      await generatePortfolioPDF(results, optimizer, lookbackPeriod, includeDividends);
+                    } catch (error) {
+                      console.error('Error generating PDF:', error);
+                      setError('Failed to generate PDF. Please try again.');
+                    }
                   }}
                   className="rounded-xl border border-white/70 bg-white/10 px-5 py-3 font-semibold backdrop-blur hover:bg-white/20"
                 >
-                  📥 Download Report
+                  📥 Download Report (PDF)
                 </button>
               )}
             </div>
@@ -1337,415 +1115,6 @@ function RiskBudgetingPageContent() {
         </div>
       </div>
     </main>
-  );
-}
-
-function MetricCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-white/20 bg-white/5 p-4">
-      <div className="text-sm text-white/70">{label}</div>
-      <div className="mt-1 text-2xl font-bold text-white">{value}</div>
-    </div>
-  );
-}
-
-function AllocationPieChart({ weights }: { weights: any[] }) {
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const total = 360; // degrees in circle
-  
-  let currentAngle = 0;
-  const segments = weights.map((w, i) => {
-    const percentage = parseFloat(w.weight);
-    const angle = (percentage / 100) * total;
-    const segment = {
-      ...w,
-      percentage,
-      startAngle: currentAngle,
-      endAngle: currentAngle + angle,
-      color: CHART_COLORS[i % CHART_COLORS.length],
-    };
-    currentAngle += angle;
-    return segment;
-  });
-
-  const radius = 80;
-  const centerX = 100;
-  const centerY = 100;
-
-  return (
-    <div className="flex flex-col items-center">
-      <div className="relative">
-        <svg width="200" height="200" viewBox="0 0 200 200" className="mb-4">
-          {segments.map((segment, i) => {
-            const startAngle = (segment.startAngle - 90) * (Math.PI / 180);
-            const endAngle = (segment.endAngle - 90) * (Math.PI / 180);
-            
-            const x1 = centerX + radius * Math.cos(startAngle);
-            const y1 = centerY + radius * Math.sin(startAngle);
-            const x2 = centerX + radius * Math.cos(endAngle);
-            const y2 = centerY + radius * Math.sin(endAngle);
-            
-            const largeArc = segment.endAngle - segment.startAngle > 180 ? 1 : 0;
-            
-            const pathData = [
-              `M ${centerX} ${centerY}`,
-              `L ${x1} ${y1}`,
-              `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
-              'Z'
-            ].join(' ');
-            
-            return (
-              <path
-                key={i}
-                d={pathData}
-                fill={segment.color}
-                stroke="rgba(255,255,255,0.3)"
-                strokeWidth="1"
-                className="transition-all cursor-pointer"
-                style={{
-                  opacity: hoveredIndex === null || hoveredIndex === i ? 1 : 0.4,
-                  transform: hoveredIndex === i ? 'scale(1.05)' : 'scale(1)',
-                  transformOrigin: '100px 100px',
-                }}
-                onMouseEnter={() => setHoveredIndex(i)}
-                onMouseLeave={() => setHoveredIndex(null)}
-              />
-            );
-          })}
-        </svg>
-        
-        {/* Center label */}
-        {hoveredIndex !== null && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
-            <div className="text-xs font-semibold">{segments[hoveredIndex].ticker}</div>
-            <div className="text-lg font-bold">{segments[hoveredIndex].percentage.toFixed(1)}%</div>
-          </div>
-        )}
-      </div>
-      
-      <div className="w-full space-y-2">
-        {weights.map((w, i) => (
-          <div 
-            key={i} 
-            className="flex items-center justify-between text-sm transition-opacity cursor-pointer"
-            style={{ opacity: hoveredIndex === null || hoveredIndex === i ? 1 : 0.5 }}
-            onMouseEnter={() => setHoveredIndex(i)}
-            onMouseLeave={() => setHoveredIndex(null)}
-          >
-            <div className="flex items-center gap-2">
-              <div 
-                className="w-3 h-3 rounded-full" 
-                style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
-              />
-              <span className="font-medium">{w.ticker}</span>
-            </div>
-            <span className="text-white/80">{w.weight}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Performance Chart Component
- * 
- * HOW THIS CHART WORKS:
- * =====================
- * Displays portfolio value over time as an interactive line chart
-
- * 
- * INPUT DATA:
- * - values: Array of portfolio values [10000, 10050, 10100, ...]
- * - dates: Corresponding dates ["2019-01-01", "2019-01-02", ...]
- * 
- * RENDERING PROCESS:
- * 
- * 1. DATA SAMPLING
- *    - 5 years of daily data = ~1,250 points
- *    - Too many to render smoothly
- *    - Solution: Sample every Nth point (e.g., every 12th day)
- *    - Result: ~100 points for smooth rendering
- * 
- * 2. COORDINATE CALCULATION
- *    - Map portfolio values to Y coordinates
- *    - Map time progression to X coordinates
- *    - Formula: y = height - (value - min) / range × height
- *    - This flips Y axis (SVG origin is top-left)
- * 
- * 3. SVG PATH GENERATION
- *    - Create path string: "M x1,y1 L x2,y2 L x3,y3..."
- *    - M = Move to (start)
- *    - L = Line to (subsequent points)
- * 
- * 4. VISUAL ELEMENTS
- *    - Grid lines: horizontal reference lines
- *    - Gradient fill: area under curve for visual appeal
- *    - Line stroke: main chart line
- *    - Hover point: circle that follows mouse
- *    - Tooltip: shows exact value and date
- * 
- * 5. INTERACTION
- *    - Invisible overlay captures mouse movement
- *    - Calculate closest data point to mouse
- *    - Show tooltip at that point
- *    - Smooth hover experience
- * 
- * WHY SVG INSTEAD OF CANVAS?
- * - Scalable (looks good at any size)
- * - Easy to add interactive elements
- * - CSS styling works naturally
- * - Accessibility-friendly
- */
-function PerformanceChart({ values, dates }: { values: number[]; dates: string[] }) {
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  
-  // Sample data points for display (show every Nth point to avoid overcrowding)
-  // With wider chart (1200px), we can show more points for smoother line
-  // Example: 1,250 points → sample every 5 → 250 points
-  const sampleRate = Math.ceil(values.length / 250);
-  const sampledValues = values.filter((_, i) => i % sampleRate === 0);
-  const sampledDates = dates.filter((_, i) => i % sampleRate === 0);
-  
-  // Calculate chart bounds with padding
-  // Padding makes the chart look nicer (not touching edges)
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const range = maxValue - minValue;
-  const padding = range * 0.1;
-  
-  const height = 350;
-  const width = 1200;
-  const topMargin = 60;
-  const bottomMargin = 20;
-  const leftMargin = 20;
-  const rightMargin = 20;
-  const chartWidth = width - leftMargin - rightMargin;
-  const chartHeight = height - topMargin - bottomMargin;
-  
-  // Create SVG path
-  // 
-  // COORDINATE MAPPING:
-  // Transform portfolio values into SVG coordinates
-  // 
-  // X-axis (Time): 
-  //   - First point (i=0) → x=leftMargin (left edge with padding)
-  //   - Last point (i=99) → x=width-rightMargin (right edge with padding)
-  //   - Formula: x = leftMargin + (index / total) × chartWidth
-  // 
-  // Y-axis (Portfolio Value):
-  //   - Flip coordinate system (SVG y=0 is top, but we want high values at top)
-  //   - Normalize value to 0-1 range: (value - min) / range
-  //   - Scale to height and flip: height - (normalized × height)
-  //   - Example: $12,000 portfolio
-  //     - Min = $9,500, Max = $12,500, Range = $3,000
-  //     - Normalized = ($12,000 - $9,500) / $3,000 = 0.833
-  //     - Y = 200 - (0.833 × 200) = 33 pixels from top
-  const points = sampledValues.map((value, i) => {
-    const x = leftMargin + (i / (sampledValues.length - 1)) * chartWidth;
-    const normalizedValue = (value - minValue + padding) / (range + 2 * padding);
-    const y = topMargin + chartHeight * (1 - normalizedValue);
-    return { x, y, value, date: sampledDates[i] };
-  });
-  
-  // Create SVG path string
-  // Format: "M x1,y1 L x2,y2 L x3,y3..."
-  // M = MoveTo (start of path)
-  // L = LineTo (draw line to next point)
-  const pathData = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-  
-  return (
-    <div className="relative">
-      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} className="overflow-visible">
-        {/* 
-          GRID LINES
-          Purpose: Visual reference, makes it easier to read values
-          Implementation: 5 horizontal lines at 0%, 25%, 50%, 75%, 100%
-        */}
-        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
-          <line
-            key={ratio}
-            x1={leftMargin}
-            y1={topMargin + chartHeight * ratio}
-            x2={width - rightMargin}
-            y2={topMargin + chartHeight * ratio}
-            stroke="rgba(255,255,255,0.1)"
-            strokeWidth="1"
-          />
-        ))}
-        
-        {/* 
-          AREA UNDER CURVE
-          Purpose: Visual appeal, makes growth more obvious
-          Implementation: 
-          - Take the line path
-          - Add line to bottom-right (L width-rightMargin, topMargin+chartHeight)
-          - Add line to bottom-left (L leftMargin, topMargin+chartHeight)
-          - Close path (Z)
-          - Fill with gradient (green fading to transparent)
-        */}
-        <path
-          d={`${pathData} L ${width - rightMargin} ${topMargin + chartHeight} L ${leftMargin} ${topMargin + chartHeight} Z`}
-          fill="url(#gradient)"
-          opacity="0.3"
-        />
-        
-        {/* 
-          MAIN LINE
-          Purpose: Shows portfolio value over time
-          Styling: 
-          - Green color (#10b981 = emerald)
-          - 2px width for visibility
-          - Rounded caps/joins for smooth appearance
-        */}
-        <path
-          d={pathData}
-          fill="none"
-          stroke="#10b981"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        
-        {/* 
-          GRADIENT DEFINITION
-          Purpose: Makes area fill fade from green at top to transparent at bottom
-          This creates a beautiful "glow" effect under the line
-        */}
-        <defs>
-          <linearGradient id="gradient" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="#10b981" stopOpacity="0.5" />
-            <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        
-        {/* 
-          HOVER POINT
-          Purpose: Shows exactly which point user is hovering over
-          Only rendered when hoveredIndex is set (not null)
-          Styled as circle with white outline for visibility
-        */}
-        {hoveredIndex !== null && points[hoveredIndex] && (
-          <circle
-            cx={points[hoveredIndex].x}
-            cy={points[hoveredIndex].y}
-            r="4"
-            fill="#10b981"
-            stroke="white"
-            strokeWidth="2"
-          />
-        )}
-      </svg>
-      
-      {/* 
-        HOVER TOOLTIP
-        Purpose: Shows exact portfolio value and date on hover
-        
-        Positioning:
-        - left: Follows X position of hovered point
-        - top: Follows Y position of hovered point
-        - transform: Shifts tooltip to center it above the point
-          - translate(-50%, -120%) = center horizontally, position above
-        
-        Styling:
-        - Semi-transparent black background
-        - White text for contrast
-        - pointer-events-none = doesn't block mouse interaction
-        
-        Content:
-        - Portfolio value (e.g., "$10,245.67")
-        - Date (e.g., "2020-03-15")
-      */}
-      {hoveredIndex !== null && points[hoveredIndex] && (
-        <div
-          className="absolute bg-black/80 text-white px-3 py-2 rounded-lg text-sm pointer-events-none"
-          style={{
-            left: `${(points[hoveredIndex].x / width) * 100}%`,
-            top: `${(points[hoveredIndex].y / height) * 100}%`,
-            transform: 'translate(-50%, -120%)',
-          }}
-        >
-          <div className="font-semibold">${points[hoveredIndex].value.toFixed(2)}</div>
-          <div className="text-xs text-white/70">{points[hoveredIndex].date}</div>
-        </div>
-      )}
-      
-      {/* Invisible hover overlay */}
-      <div
-        className="absolute inset-0"
-        style={{ cursor: 'crosshair' }}
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const relativeX = (x / rect.width) * width;
-          
-          // Account for left margin and map to data points
-          const chartX = relativeX - leftMargin;
-          const normalizedX = Math.max(0, Math.min(1, chartX / chartWidth));
-          const closestIndex = Math.round(normalizedX * (points.length - 1));
-          
-          setHoveredIndex(Math.max(0, Math.min(points.length - 1, closestIndex)));
-        }}
-        onMouseLeave={() => setHoveredIndex(null)}
-      />
-      
-      {/* Y-axis labels */}
-      <div className="mt-2 flex justify-between text-xs text-white/70">
-        <span>${minValue.toFixed(0)}</span>
-        <span className="text-center">Portfolio Value Over Time</span>
-        <span>${maxValue.toFixed(0)}</span>
-      </div>
-    </div>
-  );
-}
-
-function RiskContributionChart({ weights }: { weights: any[] }) {
-  const maxRC = Math.max(...weights.map((w: any) => parseFloat(w.riskContribution)));
-
-  return (
-    <div className="space-y-3">
-      {weights.map((w, i) => {
-        const rc = parseFloat(w.riskContribution);
-        const barWidth = (rc / maxRC) * 100;
-        
-        return (
-          <div key={i} className="space-y-1">
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-medium">{w.ticker}</span>
-              <span className="text-white/80">{w.riskContribution}%</span>
-            </div>
-            <div className="h-6 w-full rounded-lg bg-white/10 overflow-hidden">
-              <div
-                className="h-full rounded-lg transition-all duration-500 flex items-center justify-end pr-2"
-                style={{ 
-                  width: `${barWidth}%`,
-                  backgroundColor: CHART_COLORS[i % CHART_COLORS.length]
-                }}
-              >
-                {barWidth > 20 && (
-                  <span className="text-xs font-semibold text-white">
-                    {w.name}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      })}
-      
-      <div className="mt-4 pt-4 border-t border-white/20">
-        <p className="text-xs text-white/70 text-center">
-          Each bar represents the asset's contribution to total portfolio risk.
-          {(() => {
-            const rcs = weights.map((w: any) => parseFloat(w.riskContribution));
-            const maxDiff = Math.max(...rcs) - Math.min(...rcs);
-            return maxDiff < 1 
-              ? " Equal heights = Equal Risk Contribution ✓"
-              : " Custom risk budgets achieved ✓";
-          })()}
-        </p>
-      </div>
-    </div>
   );
 }
 

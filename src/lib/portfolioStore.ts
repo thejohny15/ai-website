@@ -53,6 +53,7 @@ export type Portfolio = {
     dividendCashIfReinvested?: number;
     shadowPortfolioValue?: number;
     shadowTotalReturn?: number;
+    currentRiskContributions?: Record<string, number>;
   };
 
   // ...existing fields...
@@ -156,4 +157,3 @@ export function movePortfolio(fromUserId: string, toUserId: string, id: string) 
   localStorage.setItem(toKey, JSON.stringify([p, ...toList]));
   return true;
 }
-

@@ -1,63 +1,19 @@
 // filepath: /Users/johnjohn/my-ai-app/src/lib/backtest.ts
-
-import {
-  calculateReturns,
-  calculateCovarianceMatrix,
+import { 
+  calculateReturns, 
+  calculateCovarianceMatrix, 
   optimizeERC,
-} from './riskBudgeting';
+  calculateRiskContributions,
+} from "@/lib/riskBudgeting";
+import { optimizeExpectedShortfall } from "@/lib/optimizerES";
 
 /**
  * Portfolio Backtesting and Advanced Analytics
- * 
- * This module provides functions for:
+ * * This module provides functions for:
  * - Historical portfolio simulation
  * - Rebalancing strategies (QARM methodology)
  * - Performance metrics calculation
  * - Stress testing
- * 
- * =============================================================================
- * QARM METHODOLOGY - HOW THIS WORKS:
- * =============================================================================
- * 
- * QARM (Quantitative Asset Risk Management) uses Equal Risk Contribution (ERC)
- * with quarterly rebalancing to maintain balanced risk across assets.
- * 
- * KEY PRINCIPLES:
- * 
- * 1. EQUAL RISK CONTRIBUTION (ERC)
- *    - Each asset contributes EQUALLY to total portfolio risk
- *    - Not equal weights - equal risk
- *    - Lower volatility assets get higher weights
- *    - Higher volatility assets get lower weights
- * 
- * 2. DYNAMIC WEIGHT RECALCULATION
- *    - Every quarter: recalculate optimal weights
- *    - Why? Volatilities and correlations change over time
- *    - Uses rolling window matching USER'S selected lookback period (1y, 3y, or 5y)
- *    - Maintains ERC principle with current market conditions
- * 
- * 3. DATA SPLIT AND BACKTEST PURPOSE
- *    - TODAY'S PORTFOLIO: Uses most recent N years (e.g., 2020-2025)
- *      → Optimized weights shown to user for their current portfolio
- *    - BACKTEST (HISTORICAL PERFORMANCE): Uses older data (e.g., 2015-2020)
- *      → Creates the historical performance chart shown on Dashboard and Full Analysis
- *      → Shows how the strategy would have performed in the past
- *      → Validates the strategy on out-of-sample historical data
- * 
- * 4. REBALANCING PROCESS (Quarterly)
- *    - Calculate recent covariance matrix using user's selected lookback period
- *    - Re-optimize weights using ERC
- *    - Calculate drift: how far each position moved from target
- *    - Trade only the drift amount (buy/sell to restore balance)
- *    - Deduct transaction costs (0.1% of traded amount, not full portfolio)
- * 
- * 5. PORTFOLIO VALUE TRACKING
- *    - Start with $10,000 cash
- *    - Buy shares of each asset based on target weights
- *    - Each day: Portfolio Value = Σ(shares × current_price)
- *    - Reinvest dividends automatically (DRIP)
- * 
- * =============================================================================
  */
 
 export interface RebalanceEvent {
@@ -75,6 +31,8 @@ export interface RebalanceEvent {
   }[];
   totalTradingVolume?: number; // Total $ amount of all trades
   transactionCost?: number; // Total transaction costs paid
+  pricesAtRebalance?: Record<string, number>; // Snapshot of prices used to size the trades
+  riskContributions?: Record<string, number>; // Risk contribution (≈ weights) at rebalance
 }
 
 export interface BacktestResult {
@@ -95,6 +53,8 @@ export interface BacktestResult {
   missedDividendOpportunity?: number;  // Difference between reinvested and non-reinvested
   shadowPortfolioValue?: number;  // Final value if dividends WERE reinvested (when OFF)
   shadowTotalReturn?: number;  // Total return if dividends WERE reinvested (when OFF)
+  // NEW: Store Drifted Risk Contributions
+  currentRiskContributions?: Record<string, number>;
 }
 
 export interface RebalanceConfig {
@@ -104,55 +64,6 @@ export interface RebalanceConfig {
 
 /**
  * Run a historical backtest of a portfolio
- * 
- * HOW THIS FUNCTION WORKS (Step-by-Step):
- * ========================================
- * 
- * INPUTS:
- * - pricesMap: Historical prices for each asset (e.g., SPY: [100, 101, 102...])
- * - dividendsMap: Historical dividends for each asset (0 for most days, >0 on ex-div dates)
- * - dates: Dates for each price point
- * - weights: Target allocation (e.g., [0.25, 0.25, 0.25, 0.25] = 25% each)
- * - tickers: Asset symbols (e.g., ["SPY", "LQD", "IEF", "DBC"])
- * - rebalanceConfig: How often to rebalance + transaction costs
- * - initialValue: Starting amount ($10,000 default)
- * 
- * STEP 1: INITIALIZE PORTFOLIO
- * - Take $10,000
- * - For each asset: buy shares = (target_allocation × $10,000) / price
- * - Example: 25% of $10,000 = $2,500. If SPY = $100, buy 25 shares
- * 
- * STEP 2: SIMULATE EACH DAY
- * - Calculate portfolio value = sum of (shares × current_price)
- * - Add dividend cash = sum of (shares × dividend_per_share)
- * - Reinvest dividends: buy more shares proportionally
- * - Calculate daily return = (today - yesterday) / yesterday
- * - Store values for later analysis
- * 
- * STEP 3: REBALANCE (when triggered)
- * - Check if it's time to rebalance (quarterly, monthly, etc.)
- * - Sell everything → convert to cash
- * - Apply transaction costs (0.1% per trade)
- * - Buy back assets at target weights
- * - This keeps portfolio balanced over time
- * 
- * STEP 4: CALCULATE FINAL METRICS
- * - Total return: (final_value - initial_value) / initial_value
- * - Annualized return: convert to per-year basis
- * - Volatility: how much daily returns varied
- * - Sharpe: risk-adjusted return
- * - Max drawdown: worst decline from peak
- * 
- * WHY WE DO THIS:
- * - Proves the strategy works with real historical data
- * - Shows realistic performance including costs
- * - Measures both return AND risk
- * - NOW INCLUDES DIVIDENDS for accurate total return
- * 
- * EXAMPLE OUTPUT:
- * Started with $10,000 → Ended with $13,200 (with dividends)
- * vs $12,500 (price only)
- * Dividends added 5.6% over 5 years!
  */
 export function runBacktest(
   pricesMap: Map<string, number[]>, // ticker -> price array
@@ -165,18 +76,49 @@ export function runBacktest(
   reinvestDividends: boolean = true,  // control whether to reinvest or just track
   targetBudgets?: number[],  // custom risk budgets for rebalancing (optional)
   lookbackPeriodYears?: number,  // User's selected lookback period (1, 3, or 5 years)
-  maintainFixedWeights: boolean = false  // NEW: If true, maintain initial weights at rebalance (for equal weight strategy)
+  maintainFixedWeights: boolean = false,  // NEW: If true, maintain initial weights at rebalance (for equal weight strategy)
+  optimizer: "erc" | "es" = "erc", // NEW: choose optimizer
+  outputStartIdx: number = 0       // NEW: burn-in length (days to exclude from outputs/metrics)
 ): BacktestResult {
   const n = dates.length;
+  
+  // --- SAFETY CHECK FOR NEW PORTFOLIOS (One-liner fix concept) ---
+  // If we have 0 or 1 data point, we can't run a simulation. 
+  // Return a safe "empty" result to prevent API crashes.
+  if (n < 2) {
+    const safeWeights: Record<string, number> = {};
+    tickers.forEach((t, i) => safeWeights[t] = initialWeights[i] * 100);
+    
+    return {
+      portfolioValues: [initialValue],
+      returns: [],
+      dates: dates,
+      finalValue: initialValue,
+      totalReturn: 0,
+      annualizedReturn: 0,
+      annualizedVolatility: 0,
+      sharpeRatio: 0,
+      maxDrawdown: 0,
+      maxDrawdownPeriod: { start: dates[0] || "", end: dates[0] || "" },
+      rebalanceCount: 0,
+      rebalanceDates: [],
+      dividendCash: 0,
+      dividendCashIfReinvested: 0,
+      missedDividendOpportunity: 0,
+      shadowPortfolioValue: initialValue,
+      shadowTotalReturn: 0,
+      currentRiskContributions: safeWeights, // Fallback to target RC
+    };
+  }
+
+  const sliceStart = Math.max(0, Math.min(outputStartIdx, n - 1));
+  let dividendCashAtSliceStart = 0;
+  let dividendCashIfReinvestedAtSliceStart = 0;
+  let shadowValueAtSliceStart = 0;
   const portfolioValues: number[] = [initialValue];
   const returns: number[] = [];
   let totalDividendCash = 0;  // Track cumulative dividend cash with current strategy
   let totalDividendCashIfReinvested = 0;  // Track what dividends would be if reinvested (shadow portfolio)
-  
-  // Validate data before proceeding
-  if (n === 0) {
-    throw new Error('No dates provided for backtest');
-  }
   
   for (const ticker of tickers) {
     const prices = pricesMap.get(ticker);
@@ -193,28 +135,15 @@ export function runBacktest(
   let previousTargetWeights = [...initialWeights];  // Track previous rebalance targets
   
   // Initialize positions (number of shares for each asset)
-  // 
-  // WHAT'S HAPPENING HERE:
-  // We're buying our initial positions on Day 1
-  // 
-  // Example with $10,000 and 4 assets at 25% each:
-  // - Asset 1 (SPY @ $100): Buy 25% × $10,000 / $100 = 25 shares
-  // - Asset 2 (LQD @ $50):  Buy 25% × $10,000 / $50  = 50 shares
-  // - Asset 3 (IEF @ $75):  Buy 25% × $10,000 / $75  = 33.33 shares
-  // - Asset 4 (DBC @ $20):  Buy 25% × $10,000 / $20  = 125 shares
-  // 
-  // These share counts remain constant until we rebalance
   const shares = currentWeights.map((w: number, i: number) => {
     const ticker = tickers[i];
     const prices = pricesMap.get(ticker)!;
     const targetValue = initialValue * w;  // Dollar amount to invest
-    const numShares = targetValue / prices[0];  // Shares = dollars / price
-    return numShares;
+    // Safety check for price
+    return prices[0] > 0 ? targetValue / prices[0] : 0;
   });
   
   // ALWAYS track shadow portfolio for comparison (regardless of reinvestDividends setting)
-  // If reinvestDividends=true: shadow shows what happens WITHOUT reinvestment
-  // If reinvestDividends=false: shadow shows what happens WITH reinvestment
   const shadowShares = [...shares];
   
   let rebalanceCount = 0;
@@ -222,33 +151,7 @@ export function runBacktest(
   const rebalanceEvents: RebalanceEvent[] = [];
   
   // Simulate each day
-  // 
-  // WHAT'S HAPPENING IN THIS LOOP:
-  // We're going day-by-day through history, tracking portfolio value
-  // 
-  // FOR EACH DAY:
-  // 1. Calculate portfolio value using current prices
-  // 2. Collect dividends (if any paid today)
-  // 3. Reinvest dividends proportionally
-  // 4. Calculate return vs yesterday (includes dividend impact)
-  // 5. Check if it's time to rebalance (affects NEXT day's shares)
-  // 
-  // Example Day 50:
-  // - SPY is now $105 (was $100)
-  // - We own 25 shares → worth $2,625 (was $2,500)
-  // - SPY pays $0.50 dividend today → receive $12.50 cash
-  // - Reinvest $12.50: buy 0.119 more shares at $105
-  // - Do this for all assets, sum them up
-  // - Portfolio value = $10,462.50 (includes reinvested dividends)
-  // - Daily return = ($10,462.50 - $10,400) / $10,400 = 0.60%
   for (let t = 1; t < n; t++) {
-    // CORRECTED ORDER: Process dividends FIRST, then calculate portfolio value
-    // 
-    // TIMING: Ex-dividend convention
-    // - Dividend is paid at beginning of day t
-    // - If DRIP: buy shares at price[t-1] (yesterday's close)
-    // - Then portfolio is valued at price[t] (today's close)
-    
     let cashFromDividends = 0; // Track uninvested cash
     
     // STEP 1: Process dividends (before price movement)
@@ -264,8 +167,10 @@ export function runBacktest(
           // USER CHOICE: DRIP - Buy shares at yesterday's closing price
           const prices = pricesMap.get(ticker)!;
           const buyPrice = prices[t - 1];
-          const additionalShares = dividendCash / buyPrice;
-          shares[i] += additionalShares;
+          if (buyPrice > 0) {
+            const additionalShares = dividendCash / buyPrice;
+            shares[i] += additionalShares;
+          }
         } else {
           // USER CHOICE: Cash - Accrue cash without reinvesting
           cashFromDividends += dividendCash;
@@ -279,12 +184,13 @@ export function runBacktest(
         if (reinvestDividends) {
           // User chose reinvest → shadow shows cash accumulation
           totalDividendCashIfReinvested += shadowDividendCash;
-          // Shadow shares don't change (no reinvestment)
         } else {
           // User chose cash → shadow shows reinvestment
           totalDividendCashIfReinvested += shadowDividendCash;
-          const shadowAdditionalShares = shadowDividendCash / buyPrice;
-          shadowShares[i] += shadowAdditionalShares;
+          if (buyPrice > 0) {
+             const shadowAdditionalShares = shadowDividendCash / buyPrice;
+             shadowShares[i] += shadowAdditionalShares;
+          }
         }
       }
     });
@@ -299,69 +205,72 @@ export function runBacktest(
     
     // STEP 3: Calculate return (price-driven only, dividends already handled)
     const previousValue = portfolioValues[portfolioValues.length - 1];
-    const dailyReturn = (portfolioValue - previousValue) / previousValue;
+    const dailyReturn = previousValue > 0 ? (portfolioValue - previousValue) / previousValue : 0;
     returns.push(dailyReturn);
     portfolioValues.push(portfolioValue);
+
+    // Snapshot burn-in totals at the start of the displayed window
+    if (t === sliceStart) {
+      dividendCashAtSliceStart = totalDividendCash;
+      dividendCashIfReinvestedAtSliceStart = totalDividendCashIfReinvested;
+      shadowValueAtSliceStart = tickers.reduce((sum, ticker, i) => {
+        const prices = pricesMap.get(ticker)!;
+        return sum + shadowShares[i] * prices[t];
+      }, 0);
+    }
     
     // STEP 4: Check for rebalancing
-    // QARM REBALANCING LOGIC:
-    // - Quarterly rebalancing (~60 trading days)
-    // - Purpose: maintain Equal Risk Contribution as market conditions change
-    // 
-    // DYNAMIC WEIGHT RECALCULATION (QARM Methodology):
-    // - Recalculate optimal ERC weights based on recent market data
-    // - Use rolling window matching user's selected lookback period:
-    //   * 1 year = 252 trading days
-    //   * 3 years = 756 trading days  
-    //   * 5 years = 1260 trading days
-    // - Re-optimize to maintain equal risk contribution
-    // - Weights change because volatilities/correlations change
-    // 
-    // Example: Started 25/25/25/25 (equal risk)
-    // After 3 months: bonds become more volatile
-    // New ERC optimization: bonds get LOWER weight (to maintain equal risk)
-    // Stocks become less volatile → stocks get HIGHER weight
-    // Result: 30/30/20/20 (still equal risk contribution)
-    // 
-    // SMART TRADING:
-    // - Only trade the DRIFT (difference between current and target)
-    // - Pay 0.1% fee ONLY on traded amount, not full portfolio
-    // - Much cheaper and more realistic than "sell all and rebuy"
+    const lookbackDays = lookbackPeriodYears ? lookbackPeriodYears * 252 : 252;
+
     if (shouldRebalance(dates[t], lastRebalanceDate, rebalanceConfig.frequency)) {
-      // DYNAMIC WEIGHT CALCULATION:
-      // Use user's selected lookback period (1y, 3y, or 5y)
-      const lookbackDays = lookbackPeriodYears ? lookbackPeriodYears * 252 : 252; // Default to 1 year if not specified
-      const lookbackWindow = Math.min(lookbackDays, t); // Use up to lookback period or available data
+      const lookbackWindow = Math.min(lookbackDays, t);
       const startIdx = Math.max(0, t - lookbackWindow);
-      
-      let newTargetWeights: number[];
-      
+
+      let newTargetWeights: number[] = [];
+
       if (maintainFixedWeights) {
-        // EQUAL WEIGHT STRATEGY: Always rebalance back to initial equal weights
-        // No optimization - just restore original allocation
         newTargetWeights = [...initialWeights];
         console.log(`  Equal weight rebalancing: maintaining ${(initialWeights[0] * 100).toFixed(1)}% per asset`);
       } else {
-        // RISK BUDGETING STRATEGY: Dynamic ERC optimization
-        // Extract recent price data for each asset
-        const recentReturnsData: number[][] = [];
-        for (const ticker of tickers) {
-          const prices = pricesMap.get(ticker)!;
-          const recentPrices = prices.slice(startIdx, t + 1);
-          const recentReturns = calculateReturns(recentPrices);
-          recentReturnsData.push(recentReturns);
+        // Safe calculation block
+        try {
+          // Extract recent daily price returns
+          const recentReturnsData: number[][] = [];
+          for (const ticker of tickers) {
+            const prices = pricesMap.get(ticker)!;
+            const recentPrices = prices.slice(startIdx, t + 1);
+            if (recentPrices.length < 2) throw new Error("Insufficient data");
+            const recentReturns = calculateReturns(recentPrices);
+            recentReturnsData.push(recentReturns);
+          }
+
+          // Build annualized covariance
+          const recentCovMatrix = calculateCovarianceMatrix(recentReturnsData);
+
+          if (optimizer === "es") {
+            // Annualized means from recent daily returns
+            const muAnnual = recentReturnsData.map(arr => {
+              const m = arr.reduce((s, v) => s + v, 0) / Math.max(arr.length, 1);
+              return m * 252;
+            });
+            const esOpt = optimizeExpectedShortfall({
+              mu: muAnnual,
+              sigma: recentCovMatrix,
+              alpha: 0.975,
+              budgets: targetBudgets,
+              budgetStrength: 400,
+            });
+            newTargetWeights = esOpt.weights;
+          } else {
+            const ercOpt = optimizeERC(recentCovMatrix, 1000, 1e-6, targetBudgets);
+            newTargetWeights = ercOpt.weights;
+          }
+        } catch (e) {
+          // If optimizer fails (e.g. not enough data), keep current weights
+          newTargetWeights = [...currentWeights]; 
         }
-        
-        // Calculate new covariance matrix from recent data
-        const recentCovMatrix = calculateCovarianceMatrix(recentReturnsData);
-        
-        // Re-optimize weights using ERC based on current market conditions
-        const optimization = optimizeERC(recentCovMatrix, 1000, 1e-6, targetBudgets);
-        newTargetWeights = optimization.weights;
-        
-        console.log(`  ERC rebalancing: new optimal weights calculated`);
       }
-      
+
       // Update current weights to the newly calculated weights
       currentWeights = newTargetWeights;
       
@@ -373,11 +282,10 @@ export function runBacktest(
       });
       
       // Calculate rolling volatility and Sharpe at this point
-      // Use last 252 days (1 year) of returns for stable metrics
       const rollingWindow = Math.min(252, returns.length);
       const recentReturns = returns.slice(-rollingWindow);
-      const meanReturn = recentReturns.reduce((sum, r) => sum + r, 0) / recentReturns.length;
-      const variance = recentReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / recentReturns.length;
+      const meanReturn = recentReturns.length > 0 ? recentReturns.reduce((sum, r) => sum + r, 0) / recentReturns.length : 0;
+      const variance = recentReturns.length > 0 ? recentReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / recentReturns.length : 0;
       const rollingVol = Math.sqrt(variance * 252) * 100; // Annualized
       const annualizedMeanReturn = meanReturn * 252 * 100;
       const rollingSharpe = rollingVol > 0 ? annualizedMeanReturn / rollingVol : 0;
@@ -386,22 +294,9 @@ export function runBacktest(
       const quarterWindow = Math.min(60, portfolioValues.length);
       const quarterStartValue = portfolioValues[portfolioValues.length - quarterWindow];
       const quarterEndValue = portfolioValue;
-      const quarterlyReturn = ((quarterEndValue - quarterStartValue) / quarterStartValue) * 100;
+      const quarterlyReturn = quarterStartValue > 0 ? ((quarterEndValue - quarterStartValue) / quarterStartValue) * 100 : 0;
       
       // SMART TRANSACTION COST CALCULATION:
-      // Only pay fees on the ACTUAL TRADES (drift adjustments), not full portfolio
-      // 
-      // Example:
-      // Portfolio value: $10,000
-      // SPY: Currently 28% ($2,800), target 25% ($2,500) → SELL $300
-      // LQD: Currently 22% ($2,200), target 25% ($2,500) → BUY $300
-      // IEF: Currently 25% ($2,500), target 25% ($2,500) → NO TRADE
-      // DBC: Currently 25% ($2,500), target 25% ($2,500) → NO TRADE
-      // 
-      // Total trading volume: $300 + $300 = $600 (not $10,000!)
-      // Transaction cost: 0.1% × $600 = $0.60 (not $10.00!)
-      // 
-      // This is MUCH more realistic and fair!
       let totalTradingVolume = 0;
       tickers.forEach((ticker, i) => {
         const prices = pricesMap.get(ticker)!;
@@ -415,16 +310,11 @@ export function runBacktest(
       const totalTransactionCost = totalTradingVolume * rebalanceConfig.transactionCost;
       const portfolioAfterCosts = portfolioValue - totalTransactionCost;
       
-      console.log(`  Rebalancing on ${dates[t]}`);
-      console.log(`  Total trading volume: $${totalTradingVolume.toFixed(2)}`);
-      console.log(`  Transaction cost (0.1% of trades): $${totalTransactionCost.toFixed(2)}`);
-      console.log(`  Portfolio after costs: $${portfolioAfterCosts.toFixed(2)}`);
-      
       // Rebalance ACTUAL portfolio: buy new shares at NEW OPTIMIZED weights
       tickers.forEach((ticker, i) => {
         const prices = pricesMap.get(ticker)!;
         const targetValue = portfolioAfterCosts * currentWeights[i];  // Use NEW weights!
-        shares[i] = targetValue / prices[t];  // New share count
+        shares[i] = prices[t] > 0 ? targetValue / prices[t] : 0;  // New share count
       });
       
       // Important: Update the portfolio value for THIS day to reflect transaction costs
@@ -453,9 +343,21 @@ export function runBacktest(
       tickers.forEach((ticker, i) => {
         const prices = pricesMap.get(ticker)!;
         const targetValue = shadowPortfolioAfterCosts * currentWeights[i];
-        shadowShares[i] = targetValue / prices[t];
+        shadowShares[i] = prices[t] > 0 ? targetValue / prices[t] : 0;
       });
       
+      // Capture price snapshot for drift calculations
+      const pricesAtRebalance: Record<string, number> = {};
+      tickers.forEach((ticker, i) => {
+        const prices = pricesMap.get(ticker)!;
+        pricesAtRebalance[ticker] = parseFloat(prices[t].toFixed(4));
+      });
+
+      const riskContributionSnapshot: Record<string, number> = {};
+      tickers.forEach((ticker, i) => {
+        riskContributionSnapshot[ticker] = parseFloat((currentWeights[i] * 100).toFixed(2));
+      });
+
       // Record rebalance event
       rebalanceEvents.push({
         date: dates[t],
@@ -479,6 +381,8 @@ export function runBacktest(
             tradeAmount: parseFloat(tradeAmount.toFixed(2)),
           };
         }),
+        pricesAtRebalance,
+        riskContributions: riskContributionSnapshot,
       });
       
       // Update previous target weights for next rebalance
@@ -488,88 +392,203 @@ export function runBacktest(
       lastRebalanceDate = dates[t];
     }
   }
+
+  // ============================================================
+  // DRIFTED RISK CONTRIBUTION CALCULATION (With Safety Checks)
+  // ============================================================
   
+  let currentRiskContributions: Record<string, number> = {};
+  let finalDriftedWeights: number[] = [];
+  
+  try {
+    const finalIndex = dates.length - 1;
+    
+    // 1. Calculate final drifted weights based on shares held at end of simulation
+    // Using shares array which is maintained through the loop
+    const finalPrices = tickers.map(t => {
+      const prices = pricesMap.get(t)!;
+      return prices[finalIndex];
+    });
+    
+    const finalAssetValues = shares.map((s, i) => s * finalPrices[i]);
+    const totalFinalValue = finalAssetValues.reduce((a, b) => a + b, 0);
+    
+    // Safety check: ensure we don't divide by zero
+    const safeTotalValue = totalFinalValue === 0 ? 1 : totalFinalValue;
+    finalDriftedWeights = finalAssetValues.map(v => v / safeTotalValue);
+
+    // 2. Calculate Covariance Matrix for the recent period
+    const finalLookbackDays = lookbackPeriodYears ? lookbackPeriodYears * 252 : 252;
+    // Safety check: Don't start before index 0
+    const startCovIdx = Math.max(0, dates.length - finalLookbackDays);
+    
+    const finalReturnsData: number[][] = [];
+    let hasValidData = true;
+    
+    for (const ticker of tickers) {
+      const prices = pricesMap.get(ticker)!;
+      // Safety check: ensure we have enough prices
+      if (prices.length < 2) {
+        hasValidData = false;
+        break;
+      }
+      
+      const recentPrices = prices.slice(startCovIdx, prices.length);
+      
+      if (recentPrices.length < 2) {
+        hasValidData = false;
+        break;
+      }
+      
+      const recentReturns = calculateReturns(recentPrices);
+      finalReturnsData.push(recentReturns);
+    }
+    
+    if (hasValidData) {
+      const finalCovMatrix = calculateCovarianceMatrix(finalReturnsData);
+      const { contributions } = calculateRiskContributions(
+        finalDriftedWeights,
+        finalCovMatrix
+      );
+
+      const absContributionSum = contributions.reduce(
+        (sum, rc) => sum + Math.abs(rc),
+        0
+      );
+
+      tickers.forEach((ticker, i) => {
+        const rcPct =
+          absContributionSum > 0 && Number.isFinite(contributions[i])
+            ? (Math.abs(contributions[i]) / absContributionSum) * 100
+            : finalDriftedWeights[i] * 100;
+        currentRiskContributions[ticker] = parseFloat(rcPct.toFixed(2));
+      });
+    } else {
+      console.warn("Insufficient data for final risk calculation, using weights as fallback");
+      // Fallback: RC = Weight if covariance calculation fails
+      tickers.forEach((ticker, i) => {
+        currentRiskContributions[ticker] = parseFloat((((finalDriftedWeights[i] ?? initialWeights[i] ?? 0)) * 100).toFixed(2));
+      });
+    }
+  } catch (error) {
+    console.error("Error calculating drifted risk contributions:", error);
+    // Graceful fallback so the whole API doesn't crash
+    tickers.forEach((ticker, i) => {
+      // Just use the final weight as a fallback
+      const fallbackWeight = finalDriftedWeights[i] ?? initialWeights[i] ?? 0;
+      currentRiskContributions[ticker] = parseFloat((fallbackWeight * 100).toFixed(2));
+    });
+  }
+
+  // ============================================================
+  // STRICT BURN-IN OUTPUT SLICING
+  // ============================================================
+
+  let outDates = dates;
+  let outValues = portfolioValues;
+  let scale = 1;
+
+  if (sliceStart > 0 && sliceStart < portfolioValues.length) {
+    outDates = dates.slice(sliceStart);
+
+    // Rebase so the displayed window starts at initialValue
+    const baseVal = portfolioValues[sliceStart];
+    scale = baseVal > 0 ? initialValue / baseVal : 1;
+    outValues = portfolioValues.slice(sliceStart).map(v => v * scale);
+  }
+
+  // Recompute displayed returns from rebased values
+  const outReturns: number[] = [];
+  for (let i = 1; i < outValues.length; i++) {
+    outReturns.push(outValues[i - 1] > 0 ? outValues[i] / outValues[i - 1] - 1 : 0);
+  }
+
+  // Filter rebalance events to displayed window
+  const outDateSet = new Set(outDates);
+  const outRebalanceEventsRaw =
+    sliceStart > 0
+      ? rebalanceEvents.filter(ev => outDateSet.has(ev.date))
+      : rebalanceEvents;
+
+
+  // If we rebased the displayed window, rescale monetary fields in rebalance events
+  const outRebalanceEvents =
+    sliceStart > 0
+      ? outRebalanceEventsRaw.map(ev => ({
+          ...ev,
+          portfolioValue: parseFloat((ev.portfolioValue * scale).toFixed(2)),
+          totalTradingVolume:
+            ev.totalTradingVolume !== undefined
+              ? parseFloat((ev.totalTradingVolume * scale).toFixed(2))
+              : ev.totalTradingVolume,
+          transactionCost:
+            ev.transactionCost !== undefined
+              ? parseFloat((ev.transactionCost * scale).toFixed(2))
+              : ev.transactionCost,
+          changes: ev.changes.map(ch => ({
+            ...ch,
+            tradeAmount:
+              ch.tradeAmount !== undefined
+                ? parseFloat((ch.tradeAmount * scale).toFixed(2))
+                : ch.tradeAmount,
+          })),
+        }))
+      : outRebalanceEventsRaw;
+
+
+
+  const outRebalanceCount = outRebalanceEvents.length;
+
+  // Window-only dividend totals (exclude burn-in segment)
+  const windowDividendCash = totalDividendCash - dividendCashAtSliceStart;
+  const windowDividendCashIfReinvested = totalDividendCashIfReinvested - dividendCashIfReinvestedAtSliceStart;
+
   // Calculate metrics
-  // 
-  // FINAL PERFORMANCE CALCULATIONS:
-  // Now that we've simulated the entire history, let's measure performance
-  
-  // 1. TOTAL RETURN
-  // Simple percentage gain: (end - start) / start
-  // Example: $10,000 → $12,500 = 25% total return
-  const finalValue = portfolioValues[portfolioValues.length - 1];
+  const finalValue = outValues.length > 0 ? outValues[outValues.length - 1] : initialValue;
   const totalReturn = (finalValue - initialValue) / initialValue;
+
+  const displayedYears = (outValues.length - 1) / 252;
+  const annualizedReturn =
+    displayedYears > 0 ? Math.pow(1 + totalReturn, 1 / displayedYears) - 1 : 0;
   
-  // 2. ANNUALIZED RETURN
-  // Convert total return to "per year" basis
-  // Formula: (1 + total)^(1/years) - 1
-  // 
-  // Example: 25% over 5 years
-  // = (1.25)^(1/5) - 1 = 0.0456 = 4.56% per year
-  // 
-  // Why? Compound interest: $10k × 1.0456^5 = $12.5k
-  const years = n / 252;  // 252 = trading days per year
-  const annualizedReturn = Math.pow(1 + totalReturn, 1 / years) - 1;
-  
-  // 3. VOLATILITY (Risk Measure)
-  // Standard deviation of returns
-  // Measures how much returns bounce around
-  // 
-  // Steps:
-  // a) Calculate average (mean) return
-  // b) For each return: (return - mean)²
-  // c) Average those squared differences = variance
-  // d) Square root of variance = standard deviation
-  // e) Annualize by × √252
-  // 
-  // Example: Daily returns vary by 0.7%
-  // Annualized = 0.7% × √252 = 11.1%
-  const meanReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-  const variance = returns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / returns.length;
+  const meanReturn =
+    outReturns.length > 0
+      ? outReturns.reduce((sum, r) => sum + r, 0) / outReturns.length
+      : 0;
+  const variance =
+    outReturns.length > 0
+      ? outReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / outReturns.length
+      : 0;
   const annualizedVolatility = Math.sqrt(variance * 252);
   
-  // 4. SHARPE RATIO
-  // Return per unit of risk
-  // = Annual Return / Annual Volatility
-  // 
-  // Example: 4.5% return, 11% volatility
-  // Sharpe = 4.5 / 11 = 0.41
-  // 
-  // Interpretation:
-  // > 1.0 = Excellent
-  // 0.5-1.0 = Good
-  // < 0.5 = Poor
-  // 
-  // (Assuming 0% risk-free rate for simplicity)
-  const sharpeRatio = annualizedReturn / annualizedVolatility;
+  const sharpeRatio = annualizedVolatility > 0 ? annualizedReturn / annualizedVolatility : 0;
   
-  // 5. MAX DRAWDOWN
-  // Worst peak-to-trough decline
-  // Tells you: "What's the biggest loss I would have experienced?"
-  // 
-  // Example: Portfolio hits $11,000, then drops to $9,000
-  // Max DD = ($11k - $9k) / $11k = 18.2%
-  const { maxDD, peakIndex, troughIndex } = calculateDrawdownFromValues(portfolioValues);
+  const { maxDD, peakIndex, troughIndex } = calculateDrawdownFromValues(outValues);
   
   // ALWAYS calculate shadow portfolio final value for comparison
   let shadowPortfolioValue = 0;
   tickers.forEach((ticker, i) => {
-    const prices = pricesMap.get(ticker)!;
-    const finalPrice = prices[prices.length - 1];
+    const prices = pricesMap.get(ticker);
+    const finalPrice = prices && prices.length > 0 ? prices[prices.length - 1] : 0;
     shadowPortfolioValue += shadowShares[i] * finalPrice;
   });
-  
-  const shadowTotalReturn = ((shadowPortfolioValue - initialValue) / initialValue) * 100;
-  
-  // Calculate opportunity cost
+
+  // Convert shadow portfolio to displayed-window baseline
+  let windowShadowPortfolioValue = shadowPortfolioValue;
+  if (sliceStart > 0 && shadowValueAtSliceStart > 0) {
+    windowShadowPortfolioValue = (shadowPortfolioValue / shadowValueAtSliceStart) * initialValue;
+  }
+  const windowShadowTotalReturn = ((windowShadowPortfolioValue - initialValue) / initialValue) * 100;
+
+  // Calculate opportunity cost over displayed window
   const missedOpportunity = reinvestDividends
-    ? (finalValue - shadowPortfolioValue)  // How much better reinvesting was
-    : (shadowPortfolioValue - finalValue); // How much better reinvesting would have been
+    ? (finalValue - windowShadowPortfolioValue)  // How much better reinvesting was
+    : (windowShadowPortfolioValue - finalValue); // How much better reinvesting would have been
   
   return {
-    portfolioValues,
-    returns,
-    dates,
+    portfolioValues: outValues,
+    returns: outReturns,
+    dates: outDates,
     finalValue,
     totalReturn: totalReturn * 100,
     annualizedReturn: annualizedReturn * 100,
@@ -577,16 +596,17 @@ export function runBacktest(
     sharpeRatio,
     maxDrawdown: -Math.abs(maxDD),
     maxDrawdownPeriod: {
-      start: dates[peakIndex],
-      end: dates[troughIndex],
+      start: outDates[peakIndex] || "",
+      end: outDates[troughIndex] || "",
     },
-    rebalanceCount,
-    rebalanceDates: rebalanceEvents,
-    dividendCash: totalDividendCash,
-    dividendCashIfReinvested: totalDividendCashIfReinvested,
+    rebalanceCount: outRebalanceCount,
+    rebalanceDates: outRebalanceEvents,
+    dividendCash: windowDividendCash,
+    dividendCashIfReinvested: windowDividendCashIfReinvested,
     missedDividendOpportunity: missedOpportunity,
-    shadowPortfolioValue: shadowPortfolioValue,
-    shadowTotalReturn: shadowTotalReturn,
+    shadowPortfolioValue: windowShadowPortfolioValue,
+    shadowTotalReturn: windowShadowTotalReturn,
+    currentRiskContributions, // Pass the calculated values back
   };
 }
 
@@ -596,26 +616,41 @@ export function runBacktest(
 function shouldRebalance(
   currentDate: string,
   lastRebalanceDate: string,
-  frequency: RebalanceConfig['frequency']
+  frequency: RebalanceConfig["frequency"]
 ): boolean {
   const current = new Date(currentDate);
   const last = new Date(lastRebalanceDate);
-  
+
   switch (frequency) {
-    case 'daily':
+    case "daily":
       return true;
-    case 'weekly':
+
+    case "weekly":
       return current.getTime() - last.getTime() >= 7 * 24 * 60 * 60 * 1000;
-    case 'monthly':
-      return current.getMonth() !== last.getMonth() || current.getFullYear() !== last.getFullYear();
-    case 'quarterly':
-      return Math.floor(current.getMonth() / 3) !== Math.floor(last.getMonth() / 3) || current.getFullYear() !== last.getFullYear();
-    case 'annually':
+
+    case "monthly":
+      return (
+        current.getMonth() !== last.getMonth() ||
+        current.getFullYear() !== last.getFullYear()
+      );
+
+    case "quarterly": {
+      const currentQuarter = Math.floor(current.getMonth() / 3);
+      const lastQuarter = Math.floor(last.getMonth() / 3);
+      return (
+        currentQuarter !== lastQuarter ||
+        current.getFullYear() !== last.getFullYear()
+      );
+    }
+
+    case "annually":
       return current.getFullYear() !== last.getFullYear();
+
     default:
       return false;
   }
 }
+
 
 /**
  * Calculate max drawdown from portfolio value series
@@ -653,34 +688,6 @@ function calculateDrawdownFromValues(values: number[]): {
   };
 }
 
-/**
- * Run stress test: scale volatility
- * 
- * STRESS TESTING EXPLAINED:
- * =========================
- * This simulates "what if volatility doubled?"
- * 
- * HOW IT WORKS:
- * - Take the covariance matrix (measures asset volatilities & correlations)
- * - Multiply all values by scaleFactor (e.g., 2 = double volatility)
- * - Re-optimize portfolio with this stressed covariance matrix
- * - Compare new weights vs original weights
- * 
- * WHY WE DO THIS:
- * - Tests portfolio resilience in extreme scenarios
- * - Shows how allocation would change in crisis
- * - Helps understand risk exposure
- * 
- * EXAMPLE:
- * Normal volatility: 10%
- * 2x stress: 20% volatility
- * Result: Portfolio shifts toward safer assets (bonds ↑, stocks ↓)
- * 
- * REAL-WORLD CONTEXT:
- * - March 2020 (COVID): volatility spiked 3-4x
- * - 2008 Crisis: volatility doubled
- * - This test shows you'd be prepared
- */
 export function stressTestVolatility(
   covMatrix: number[][],
   scaleFactor: number
@@ -688,35 +695,6 @@ export function stressTestVolatility(
   return covMatrix.map(row => row.map(val => val * scaleFactor));
 }
 
-/**
- * Find worst period in historical data
- * 
- * CRISIS DETECTION EXPLAINED:
- * ===========================
- * This finds the worst 30-day period in your backtest
- * 
- * HOW IT WORKS:
- * - Use a sliding window of N days (default 30)
- * - For each possible window:
- *   - Calculate loss = (end_value - start_value) / start_value
- *   - Track the worst loss
- * - Return the dates and magnitude of worst period
- * 
- * WHY WE DO THIS:
- * - Identifies your portfolio's behavior during crises
- * - Shows realistic "worst case" based on history
- * - More meaningful than theoretical scenarios
- * 
- * EXAMPLE FINDINGS:
- * "Worst 30 days: Feb 19, 2020 to March 23, 2020
- *  Portfolio loss: -18.3%
- *  This was during COVID market crash"
- * 
- * USES:
- * - Risk assessment: "Could I handle an 18% loss?"
- * - Compare to benchmarks: "S&P 500 was down 34% same period"
- * - Stress test: "How would 2x that loss affect me?"
- */
 export function findWorstPeriod(
   portfolioValues: number[],
   dates: string[],
@@ -735,7 +713,7 @@ export function findWorstPeriod(
   for (let i = 0; i < portfolioValues.length - windowDays; i++) {
     const startValue = portfolioValues[i];
     const endValue = portfolioValues[i + windowDays];
-    const loss = (endValue - startValue) / startValue;
+    const loss = startValue > 0 ? (endValue - startValue) / startValue : 0;
     
     if (loss < worstLoss) {
       worstLoss = loss;
@@ -748,53 +726,11 @@ export function findWorstPeriod(
     startIndex: worstStart,
     endIndex: worstEnd,
     loss: worstLoss * 100,
-    startDate: dates[worstStart],
-    endDate: dates[worstEnd],
+    startDate: dates[worstStart] || "",
+    endDate: dates[worstEnd] || "",
   };
 }
 
-/**
- * Calculate strategy comparison
- * 
- * STRATEGY COMPARISON EXPLAINED:
- * ==============================
- * Compare your optimized portfolio against simpler alternatives
- * 
- * STRATEGIES WE COMPARE:
- * 
- * 1. RISK BUDGETING (Your Strategy)
- *    - Uses equal risk contribution optimization
- *    - Scientifically balances risk across assets
- *    - Adapts to each asset's volatility
- *    Example weights: [35%, 28%, 22%, 15%]
- * 
- * 2. EQUAL WEIGHT (Naive Diversification)
- *    - Simple: divide money equally
- *    - Ignores risk differences between assets
- *    - 1/N rule: if 4 assets, each gets 25%
- *    Example weights: [25%, 25%, 25%, 25%]
- * 
- * WHY COMPARE?
- * - Proves risk budgeting adds value
- * - Shows improvement in risk-adjusted returns
- * - Demonstrates benefit of sophisticated allocation
- * 
- * WHAT TO LOOK FOR:
- * - Risk Budgeting should have BETTER Sharpe Ratio
- * - Lower max drawdown (less crisis pain)
- * - Similar or better returns with less risk
- * 
- * EXAMPLE RESULTS:
- * Strategy        | Return | Vol  | Sharpe | Max DD
- * Risk Budgeting  | 8.2%   | 11%  | 0.75   | -15%
- * Equal Weight    | 7.5%   | 13%  | 0.58   | -19%
- * 
- * Interpretation: Risk budgeting delivers:
- * - Higher return (+0.7%)
- * - Lower risk (-2% volatility)
- * - Better Sharpe (+0.17)
- * - Smaller drawdowns (-4%)
- */
 export function compareStrategies(
   pricesMap: Map<string, number[]>,
   dividendsMap: Map<string, number[]>,
@@ -803,54 +739,47 @@ export function compareStrategies(
   riskBudgetWeights: number[],
   rebalanceConfig: RebalanceConfig,
   reinvestDividends: boolean = true,
-  targetBudgets?: number[],  // custom risk budgets
-  lookbackPeriodYears?: number  // NEW: User's selected lookback period
+  targetBudgets?: number[],
+  lookbackPeriodYears?: number,
+  optimizer: "erc" | "es" = "erc", // NEW: propagate optimizer
+  outputStartIdx: number = 0
 ): {
   riskBudgeting: BacktestResult;
   equalWeight: BacktestResult;
   marketCap?: BacktestResult;
 } {
-  // Risk Budgeting strategy (your optimized weights with dynamic rebalancing)
   const riskBudgeting = runBacktest(
-    pricesMap, 
-    dividendsMap, 
-    dates, 
-    riskBudgetWeights, 
-    tickers, 
-    rebalanceConfig, 
-    10000, 
+    pricesMap,
+    dividendsMap,
+    dates,
+    riskBudgetWeights,
+    tickers,
+    rebalanceConfig,
+    10000,
     reinvestDividends,
-    targetBudgets,  // Pass custom budgets for dynamic rebalancing
-    lookbackPeriodYears,  // Pass user's lookback period
-    false  // Dynamic ERC rebalancing
+    targetBudgets,
+    lookbackPeriodYears,
+    false,
+    optimizer, // NEW
+    outputStartIdx
   );
-  
-  // Equal Weight strategy (naive 1/N allocation)
-  // Simply divide money equally: 1/N for N assets
-  // Rebalances back to equal weights quarterly (no optimization)
+
   const equalWeights = Array(tickers.length).fill(1 / tickers.length);
   const equalWeight = runBacktest(
-    pricesMap, 
-    dividendsMap, 
-    dates, 
-    equalWeights, 
-    tickers, 
-    rebalanceConfig, 
-    10000, 
+    pricesMap,
+    dividendsMap,
+    dates,
+    equalWeights,
+    tickers,
+    rebalanceConfig,
+    10000,
     reinvestDividends,
-    undefined,  // No custom budgets for equal weight
-    lookbackPeriodYears,  // Use same lookback period for fair comparison
-    true  // Maintain fixed equal weights (no optimization)
+    undefined,
+    lookbackPeriodYears,
+    true,
+    optimizer, // harmless here (fixed weights)
+    outputStartIdx
   );
-  
-  // Could add more strategies here:
-  // - 60/40 (60% stocks, 40% bonds)
-  // - Market cap weighted
-  // - Minimum variance
-  // - etc.
-  
-  return {
-    riskBudgeting,
-    equalWeight,
-  };
+
+  return { riskBudgeting, equalWeight };
 }

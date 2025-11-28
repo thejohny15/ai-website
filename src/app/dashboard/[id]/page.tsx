@@ -6,15 +6,22 @@ import { useUser } from "@clerk/nextjs";
 import { useEffect, useState, useMemo } from "react";
 import {
   getPortfolio,
-  updatePortfolio,            // ← use this to persist currentHoldings
+  updatePortfolio,
   type Portfolio,
   type Holding,
 } from "@/lib/portfolioStore";
 import PortfolioPerformanceChart from "@/components/PortfolioPerformanceChart";
 import PortfolioPerformanceSinceCreation from "@/components/PortfolioPerformanceSinceCreation";
+import { generatePortfolioPDF } from "@/components/portfolio/PDFGenerator";
 
 /** Local type for a user-owned position (persisted in Portfolio.currentHoldings). */
-type UserPosition = { symbol: string; shares: number; buyPrice: number; buyDate: string; note?: string };
+type UserPosition = {
+  symbol: string;
+  shares: number;
+  buyPrice: number;
+  buyDate: string;
+  note?: string;
+};
 
 export default function PortfolioDetail() {
   const params = useParams();
@@ -29,8 +36,16 @@ export default function PortfolioDetail() {
   const [historicalRebalancingData, setHistoricalRebalancingData] = useState<any[]>([]);
   const [loadingRebalancing, setLoadingRebalancing] = useState(false);
   const [sinceCreationRebalancingData, setSinceCreationRebalancingData] = useState<any[]>([]);
+  const [sinceCreationMeta, setSinceCreationMeta] = useState<{
+    initialPrices?: Record<string, number>;
+    initialDate?: string;
+    todaysPrices?: Record<string, number>;
+    mostRecentDate?: string;
+  }>({});
   const [loadingSinceCreation, setLoadingSinceCreation] = useState(false);
+  const [sinceCreationNotice, setSinceCreationNotice] = useState<string | null>(null);
   const [currentRiskContributions, setCurrentRiskContributions] = useState<Record<string, number>>({});
+  const [downloadingPDF, setDownloadingPDF] = useState(false);
 
   // Load portfolio
   useEffect(() => {
@@ -131,17 +146,8 @@ export default function PortfolioDetail() {
           qtrReturn: rebalance.quarterlyReturn?.toFixed(2) || "0.00",
           vol: rebalance.volatility?.toFixed(2) || "0.00",
           sharpe: rebalance.sharpe?.toFixed(2) || "0.00",
-          // Extract prices at rebalance from the changes data
-          pricesAtRebalance: (rebalance.changes || []).reduce((acc: Record<string, number>, change: any) => {
-            // Store the price at this rebalance point (calculated from portfolio value and weight)
-            const ticker = change.symbol || change.ticker;
-            if (ticker) {
-              // Approximate price from portfolio value and after-weight
-              acc[ticker] = 0; // Will be updated with actual prices from quotes
-            }
-            return acc;
-          }, {} as Record<string, number>),
-          riskContributions: (rebalance.changes || []).reduce((acc: Record<string, number>, change: any) => {
+          pricesAtRebalance: rebalance.pricesAtRebalance || {},
+          riskContributions: rebalance.riskContributions || (rebalance.changes || []).reduce((acc: Record<string, number>, change: any) => {
             const ticker = change.symbol || change.ticker;
             if (ticker) {
               acc[ticker] = parseFloat(change.afterWeight);
@@ -239,23 +245,22 @@ export default function PortfolioDetail() {
     
     async function fetchSinceCreationData() {
       setLoadingSinceCreation(true);
+      setSinceCreationNotice(null);
       try {
         const symbols = p!.proposalHoldings!.map(h => h.symbol);
         const weights = p!.proposalHoldings!.map(h => h.weight);
+        const lookbackYears = (() => {
+          const lb = p!.proposalSummary?.lookbackPeriod;
+          if (typeof lb === 'string') {
+            const match = lb.match(/(\d+)/);
+            if (match) return parseInt(match[1], 10);
+          }
+          return 5;
+        })();
         
         // Get creation date and today
         const creationDate = new Date(p!.createdAt);
         const today = new Date();
-        
-        // Check if portfolio was created today or very recently (less than 2 days ago)
-        const daysSinceCreation = Math.floor((today.getTime() - creationDate.getTime()) / (1000 * 60 * 60 * 24));
-        
-        if (daysSinceCreation < 2) {
-          // Portfolio too new - skip this API call
-          console.log('Portfolio created too recently, skipping since-creation analysis');
-          setLoadingSinceCreation(false);
-          return;
-        }
         
         const response = await fetch('/api/rebalancing-data', {
           method: 'POST',
@@ -265,17 +270,46 @@ export default function PortfolioDetail() {
             weights,
             startDate: creationDate.toISOString().split('T')[0],
             endDate: today.toISOString().split('T')[0],
-            includeCorrelations: true // Request correlation data
+            includeCorrelations: true, // Request correlation data
+            lookbackPeriodYears: lookbackYears,
           })
         });
         
         if (!response.ok) throw new Error('Failed to fetch since creation data');
-        
+
         const data = await response.json();
         console.log('Rebalancing data received:', data); // Debug log
+        
+        if (data?.insufficientHistory) {
+          setSinceCreationNotice(
+            data.message || 'Performance since creation will populate after the first full trading day.'
+          );
+          setSinceCreationRebalancingData([]);
+          setSinceCreationMeta({
+            initialPrices: data.initialPrices || {},
+            initialDate: data.initialDate,
+            todaysPrices: data.todaysPrices || {},
+            mostRecentDate: data.mostRecentDate,
+          });
+          setCurrentRiskContributions({});
+          return;
+        } else {
+          setSinceCreationNotice(null);
+        }
+
         setSinceCreationRebalancingData(data.rebalancingData || []);
+        setSinceCreationMeta({
+          initialPrices: data.initialPrices,
+          initialDate: data.initialDate,
+          todaysPrices: data.todaysPrices,
+          mostRecentDate: data.mostRecentDate,
+        });
+        if (data.currentRiskContributions) {
+          setCurrentRiskContributions(data.currentRiskContributions);
+        }
       } catch (error) {
         console.error('Error fetching since creation data:', error);
+        setSinceCreationNotice('Unable to load performance since creation yet. Please try again soon.');
       } finally {
         setLoadingSinceCreation(false);
       }
@@ -288,8 +322,21 @@ export default function PortfolioDetail() {
   useEffect(() => {
     if (!p?.proposalHoldings || !quotes || Object.keys(quotes).length === 0) return;
     
-    // SIMPLE APPROACH: For day 1, extract risk contributions from the note field
-    // These are saved during portfolio creation and are the TRUE ERC values
+    // If we already have drifted risk contributions from the since-creation API,
+    // avoid overriding them with approximations.
+    if (Object.keys(currentRiskContributions).length > 0) return;
+    
+    // NEW LOGIC: Use calculate drifted risk contributions from backtest if available
+    // We cast to `any` because `Portfolio` type might not have been updated in your store file yet
+    const results = p.backtestResults as any;
+    
+    if (results?.currentRiskContributions) {
+      console.log('✅ Using calculated Drifted Risk Contributions from Backtest:', results.currentRiskContributions);
+      setCurrentRiskContributions(results.currentRiskContributions);
+      return;
+    } 
+    
+    // FALLBACK: Use notes or weights
     const riskContribs: Record<string, number> = {};
     let hasAllRiskContribs = true;
     
@@ -315,7 +362,16 @@ export default function PortfolioDetail() {
       });
       setCurrentRiskContributions(fallback);
     }
-  }, [p?.proposalHoldings, quotes, sinceCreationRebalancingData]);
+  }, [p?.proposalHoldings, quotes, sinceCreationRebalancingData, p?.backtestResults, currentRiskContributions]);
+
+  const getClosingPrice = (symbol: string): number => {
+    const close = sinceCreationMeta.todaysPrices?.[symbol];
+    if (typeof close === "number" && !Number.isNaN(close)) {
+      return close;
+    }
+    const quote = quotes[symbol];
+    return quote?.price ?? 0;
+  };
 
   // Early returns AFTER all hooks
   if (!isLoaded) return null;
@@ -334,7 +390,131 @@ export default function PortfolioDetail() {
 
   const hasProposal = Array.isArray(p.proposalHoldings) && p.proposalHoldings.length > 0;
   const summary = p.proposalSummary;
-  const isRiskBudgeting = typeof summary === "object" && summary?.methodology === "Equal Risk Contribution (ERC)";
+  const isRiskBudgeting =
+    typeof summary === "object" &&
+    typeof summary?.methodology === "string" &&
+    /risk/i.test(summary.methodology);
+
+  // ES metrics (if present). Non-intrusive: computed but UI hidden when absent.
+  const esMetrics =
+    summary &&
+    typeof summary === "object" &&
+    summary.metrics &&
+    summary.metrics.ES
+      ? {
+          ES: summary.metrics.ES as string,
+          H: summary.metrics.H as string | undefined,
+          D: summary.metrics.D as string | undefined,
+          RCshare:
+            (summary.weights?.map((w: any) => ({
+              ticker: w.ticker,
+              rcShare: w.riskContribution,
+            })) as { ticker: string; rcShare: string }[]) || [],
+        }
+      : undefined;
+  const optimizerMode: "erc" | "es" =
+    summary?.methodology?.toLowerCase().includes("shortfall") ? "es" : "erc";
+  const lookbackLabel = (summary?.lookbackPeriod as "1y" | "3y" | "5y" | "3m") || "5y";
+  const backtestResultsData = p.backtestResults;
+  const sinceCreationLatest = sinceCreationRebalancingData.length > 0
+    ? sinceCreationRebalancingData[sinceCreationRebalancingData.length - 1]
+    : null;
+  const sinceCreationReturnPct = sinceCreationLatest
+    ? ((parseFloat(sinceCreationLatest.portfolioValue) - 10000) / 10000) * 100
+    : undefined;
+
+  const handleDownloadReport = async () => {
+    if (!p || !(p.proposalHoldings?.length)) return;
+    try {
+      setDownloadingPDF(true);
+      const weights = (p.proposalHoldings ?? []).map((holding) => {
+        const nameFromNote = holding.note?.split(" • ")[0];
+        return {
+          name: nameFromNote || holding.symbol,
+          ticker: holding.symbol,
+          weight: holding.weight,
+          riskContribution: currentRiskContributions[holding.symbol],
+        };
+      });
+
+  const pdfResults = {
+    asOf: summary?.dataAsOf || sinceCreationMeta.mostRecentDate,
+    weights,
+        metrics: summary
+          ? {
+              expectedReturn: summary.expectedReturn,
+              portfolioVolatility: summary.portfolioVolatility,
+              sharpeRatio: summary.sharpeRatio,
+              maxDrawdown: summary.maxDrawdown,
+            }
+          : undefined,
+        correlationMatrix: summary?.correlationMatrix,
+        avgCorrelation: summary?.avgCorrelation,
+        volatilityTargeting: summary?.volatilityTargeting,
+        analytics: backtestResultsData
+          ? {
+              backtest: {
+                totalReturn: backtestResultsData.totalReturn,
+                annualizedReturn: backtestResultsData.annualizedReturn,
+                annualizedVolatility: backtestResultsData.annualizedVolatility,
+                sharpeRatio: backtestResultsData.sharpeRatio,
+                maxDrawdown: backtestResultsData.maxDrawdown,
+                finalValue: backtestResultsData.finalValue,
+                rebalanceCount: backtestResultsData.rebalanceDates?.length,
+                dividendCash: backtestResultsData.dividendCash,
+                dividendCashIfReinvested: backtestResultsData.dividendCashIfReinvested,
+                dates: backtestResultsData.dates,
+                maxDrawdownPeriod: backtestResultsData.maxDrawdownPeriod,
+              },
+            }
+          : undefined,
+    livePerformance: sinceCreationReturnPct !== undefined
+      ? {
+          totalReturnPct: sinceCreationReturnPct,
+          finalValue: sinceCreationLatest ? parseFloat(sinceCreationLatest.portfolioValue) : undefined,
+          startDate: sinceCreationMeta.initialDate || summary?.dataAsOf,
+          endDate: sinceCreationMeta.mostRecentDate,
+        }
+      : undefined,
+    currentPerformanceSeries: (() => {
+      const series: { date?: string; value: number }[] = [];
+      const creationDate = sinceCreationMeta.initialDate || summary?.dataAsOf;
+      if (creationDate) {
+        series.push({ date: creationDate, value: 10000 });
+      }
+      if (sinceCreationRebalancingData.length > 0) {
+        sinceCreationRebalancingData.forEach((rebalance: any) => {
+          const value = parseFloat(rebalance.portfolioValue);
+          if (!Number.isNaN(value)) {
+            series.push({ date: rebalance.date, value });
+          }
+        });
+      }
+      if (series.length === 0 && backtestResultsData?.portfolioValues?.length) {
+        backtestResultsData.portfolioValues.forEach((value: number, idx: number) => {
+          series.push({
+            date: backtestResultsData.dates?.[idx],
+            value,
+          });
+        });
+      }
+      return series.length > 1 ? series : undefined;
+    })(),
+    includeDividends: Boolean(backtestResultsData?.dividendCashIfReinvested),
+  };
+
+      await generatePortfolioPDF(
+        pdfResults as any,
+        optimizerMode,
+        lookbackLabel,
+        Boolean(backtestResultsData?.dividendCashIfReinvested)
+      );
+    } catch (error) {
+      console.error("Failed to generate dashboard PDF:", error);
+    } finally {
+      setDownloadingPDF(false);
+    }
+  };
 
   // Render
   return (
@@ -399,7 +579,88 @@ export default function PortfolioDetail() {
                   <MetricBox label="Optimization Date" value={summary.dataAsOf} />
                   <MetricBox label="Asset Count" value={p.proposalHoldings?.length.toString() || '0'} />
                 </div>
-                
+                <div className="mb-6 flex flex-wrap gap-3">
+                  <button
+                    onClick={handleDownloadReport}
+                    disabled={downloadingPDF || !(p.proposalHoldings?.length)}
+                    className="rounded-xl border border-white/40 bg-white/10 px-4 py-2 text-sm font-semibold text-white hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {downloadingPDF ? "Preparing PDF..." : "📥 Download Portfolio PDF"}
+                  </button>
+                </div>
+
+                {/* ES / RC* / H / D block (non-intrusive; only renders when esMetrics present) */}
+                {esMetrics && (
+                  <div className="mb-6 rounded-xl border border-fuchsia-500/40 bg-fuchsia-500/10 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <svg
+                          className="w-5 h-5 text-fuchsia-200"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                        >
+                          <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm1 11H9v-2h2v2zm0-4H9V5h2v4z" />
+                        </svg>
+                        <span className="text-sm font-semibold text-fuchsia-100">
+                          Expected Shortfall Risk-Budgeting Metrics
+                        </span>
+                      </div>
+                      <div className="flex gap-4 text-xs">
+                        <div className="text-right">
+                          <div className="text-fuchsia-200/80">ES (97.5% Tail Risk)</div>
+                          <div className="text-lg font-bold text-fuchsia-50">
+                            {Number(esMetrics.ES).toFixed(4)}
+                          </div>
+                        </div>
+                        {esMetrics.H && (
+                          <div className="text-right">
+                            <div className="text-fuchsia-200/80">Entropy H(x)</div>
+                            <div className="text-lg font-bold text-fuchsia-50">
+                              {Number(esMetrics.H).toFixed(4)}
+                            </div>
+                          </div>
+                        )}
+                        {esMetrics.D && (
+                          <div className="text-right">
+                            <div className="text-fuchsia-200/80">Effective N (D)</div>
+                            <div className="text-lg font-bold text-fuchsia-50">
+                              {Number(esMetrics.D).toFixed(2)}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {esMetrics.RCshare.length > 0 && (
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        {esMetrics.RCshare.map((rc) => (
+                          <div
+                            key={rc.ticker}
+                            className="flex items-center justify-between rounded-lg bg-slate-900/50 px-3 py-2"
+                          >
+                            <span className="text-xs font-medium text-slate-100">
+                              {rc.ticker}
+                            </span>
+                            <span className="text-xs text-fuchsia-100">
+                              RC*:&nbsp;
+                              <span className="font-semibold">
+                                {Number(rc.rcShare).toFixed(2)}%
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <p className="mt-3 text-[11px] text-fuchsia-100/80">
+                      ES is computed from daily total returns with a Gaussian approximation at the
+                      97.5% confidence level, using a shrinkage covariance matrix. RC* shows each
+                      asset&apos;s share of total Expected Shortfall. H(x) and D(x)=e^H measure
+                      diversification: higher D means more evenly-spread risk.
+                    </p>
+                  </div>
+                )}
+
                 {/* Info: Backtest vs Forward Estimates */}
                 {p.backtestResults && (
                   <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 p-4 mb-4">
@@ -504,6 +765,7 @@ export default function PortfolioDetail() {
                   portfolioValues: p.backtestResults.portfolioValues,
                   dates: p.backtestResults.dates
                 } : undefined}
+                benchmarkSymbol="SPY"
               />
 
               {/* Historical Rebalancing Timeline - Directly under chart */}
@@ -600,8 +862,15 @@ export default function PortfolioDetail() {
                   return dates;
                 })()}
                 rebalancingFrequency={p.rebalancingFrequency || 'quarterly'}
+                benchmarkSymbol="SPY"
               />
             </div>
+
+            {sinceCreationNotice && (
+              <div className="mb-6 rounded-2xl border border-amber-400/30 bg-amber-500/10 p-4 backdrop-blur-xl shadow-2xl">
+                <p className="text-sm text-amber-50">{sinceCreationNotice}</p>
+              </div>
+            )}
 
             {/* Opportunity Cost Analysis */}
             <div className="mb-6 rounded-2xl border border-slate-600/50 bg-slate-800/60 p-6 backdrop-blur-xl shadow-2xl">
@@ -659,7 +928,7 @@ export default function PortfolioDetail() {
                     <div className="grid grid-cols-2 gap-4">
                       {/* Current Strategy (With Reinvestment) */}
                       <div className="rounded-lg bg-emerald-900/40 p-4 border-2 border-emerald-400/50 shadow-lg">
-                        <div className="text-xs text-emerald-200 mb-1 flex items-center gap-1.5">
+                        <div className="text-xs text-emerald-300/80 mb-1 flex items-center gap-1.5">
                           <span>✅ With Reinvestment</span>
                           <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/30 border border-emerald-400/40">Current</span>
                         </div>
@@ -930,14 +1199,15 @@ export default function PortfolioDetail() {
             weight: h.weight
           })) || [];
       
-      // Get historical prices from last rebalance
-      const pricesAtRebalance: Record<string, number> = lastRebalanceData?.pricesAtRebalance || {};
+      // Get historical prices from last rebalance or initial creation snapshot
+      const basePrices: Record<string, number> = lastRebalanceData?.pricesAtRebalance
+        || sinceCreationMeta.initialPrices
+        || {};
       
       // Calculate ACCURATE current weights using real historical prices
       const currentWeights = targetWeights.map((tw: any) => {
-        const quote = quotes[tw.symbol];
-        const currentPrice = quote?.price || 0;
-        const rebalancePrice = pricesAtRebalance[tw.symbol] || currentPrice; // Fallback to current if no historical data
+        const currentPrice = getClosingPrice(tw.symbol);
+        const rebalancePrice = basePrices[tw.symbol] || currentPrice || 0;
         
         // Calculate shares bought at last rebalance
         const initialValue = 10000 * (tw.weight / 100);
@@ -1039,15 +1309,15 @@ export default function PortfolioDetail() {
                           targetWeight: h.weight
                         })) || [];
                     
-                    const pricesAtRebalance: Record<string, number> = lastRebalanceData?.pricesAtRebalance || {};
+                    const pricesAtRebalance: Record<string, number> =
+                      lastRebalanceData?.pricesAtRebalance || sinceCreationMeta.initialPrices || {};
                     
                     // Get risk contributions from last rebalance
                     const lastRebalanceRiskContrib: Record<string, number> = lastRebalanceData?.riskContributions || {};
                     
                     // Calculate current metrics for each holding
                     const holdings = targetWeights.map((tw: any) => {
-                      const quote = quotes[tw.symbol];
-                      const currentPrice = quote?.price || 0;
+                      const currentPrice = getClosingPrice(tw.symbol);
                       const rebalancePrice = pricesAtRebalance[tw.symbol] || currentPrice;
                       
                       // Calculate shares and current value
@@ -1076,10 +1346,12 @@ export default function PortfolioDetail() {
                       const currentWeight = totalValue > 0 ? (h.currentValue / totalValue * 100) : h.targetWeight;
                       const drift = currentWeight - h.targetWeight;
                       
-                      // Use actual risk contribution from last rebalance if available, otherwise use current weight
-                      const riskContribution = lastRebalanceRiskContrib[h.symbol] !== undefined
-                        ? lastRebalanceRiskContrib[h.symbol]
-                        : currentWeight;
+                      // UPDATED LOGIC HERE: Use the Drifted Risk Contribution from state if available
+                      // If available, this comes from the backend calculation (Euler decomp).
+                      // If not (legacy portfolio), fallback to current weight approximation.
+                      const riskContribDisplay = currentRiskContributions[h.symbol] !== undefined
+                        ? currentRiskContributions[h.symbol].toFixed(2)
+                        : currentWeight.toFixed(2);
                       
                       return (
                         <tr key={i} className="border-b border-slate-600/20 hover:bg-slate-700/30 transition">
@@ -1101,7 +1373,7 @@ export default function PortfolioDetail() {
                             </span>
                           </td>
                           <td className="py-3 pr-4 text-right text-slate-300">
-                            {(currentRiskContributions[h.symbol] || currentWeight).toFixed(2)}%
+                            {riskContribDisplay}%
                           </td>
                         </tr>
                       );
@@ -1112,12 +1384,9 @@ export default function PortfolioDetail() {
             </div>
             <div className="mt-4 p-3 rounded-lg border border-purple-500/30 bg-purple-500/10">
               <p className="text-xs text-purple-200">
-                <strong>Daily Tracking:</strong> This table updates once per day after market close (4:00 PM ET). 
-                <strong> Target Weight</strong> = optimized allocation from last rebalance. 
-                <strong> Current Weight</strong> = actual weight based on most recent closing prices. 
-                <strong> Drift</strong> = difference from target (rebalancing corrects large drifts). 
-                <strong> Return</strong> = price change since last quarterly rebalance. 
-                <strong> Risk Contrib.</strong> = calculated daily using current weights, rolling volatility ({p.proposalSummary?.lookbackPeriod || '5y'} window), and correlation matrix.
+                <strong>Risk Contribution:</strong> This value calculates the percentage of total portfolio risk contributed by each asset. 
+                It uses the current (drifted) weights and the rolling {p.proposalSummary?.lookbackPeriod || '5y'} covariance matrix. 
+                When RC equals Target Weight, the portfolio is perfectly balanced (ERC). Deviations indicate the need to rebalance.
               </p>
             </div>
           </div>
@@ -1314,85 +1583,120 @@ function AllocationPieChart({ weights }: { weights: any[] }) {
   const centerY = 100;
 
   return (
-    <div className="flex flex-col items-center">
-      <div className="relative">
-        <svg width="200" height="200" viewBox="0 0 200 200" className="mb-4">
-          {segments.map((segment, i) => {
-            const startAngle = (segment.startAngle - 90) * (Math.PI / 180);
-            const endAngle = (segment.endAngle - 90) * (Math.PI / 180);
-            
-            const x1 = centerX + radius * Math.cos(startAngle);
-            const y1 = centerY + radius * Math.sin(startAngle);
-            const x2 = centerX + radius * Math.cos(endAngle);
-            const y2 = centerY + radius * Math.sin(endAngle);
-            
-            const largeArc = segment.endAngle - segment.startAngle > 180 ? 1 : 0;
-            
-            const pathData = [
-              `M ${centerX} ${centerY}`,
-              `L ${x1} ${y1}`,
-              `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
-              'Z'
-            ].join(' ');
-            
-            return (
-              <path
-                key={i}
-                d={pathData}
-                fill={segment.color}
-                stroke="rgba(255,255,255,0.3)"
-                strokeWidth="1"
-                className="transition-all cursor-pointer"
-                style={{
-                  opacity: hoveredIndex === null || hoveredIndex === i ? 1 : 0.4,
-                  transform: hoveredIndex === i ? 'scale(1.05)' : 'scale(1)',
-                  transformOrigin: '100px 100px',
-                }}
-                onMouseEnter={() => setHoveredIndex(i)}
-                onMouseLeave={() => setHoveredIndex(null)}
-              />
-            );
-          })}
-        </svg>
-        
-        {/* Center label */}
-        {hoveredIndex !== null && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
-            <div className="text-xs font-semibold text-white">{segments[hoveredIndex].ticker}</div>
-            <div className="text-lg font-bold text-white">{segments[hoveredIndex].percentage.toFixed(1)}%</div>
+  <div className="flex flex-col items-center">
+    {/* WRAP svg + center label together */}
+    <div className="relative">
+      <svg width="200" height="200" viewBox="0 0 200 200" className="mb-4">
+        {segments.map((segment, i) => {
+          const startAngle = (segment.startAngle - 90) * (Math.PI / 180);
+          const endAngle   = (segment.endAngle   - 90) * (Math.PI / 180);
+
+          const x1 = centerX + radius * Math.cos(startAngle);
+          const y1 = centerY + radius * Math.sin(startAngle);
+          const x2 = centerX + radius * Math.cos(endAngle);
+          const y2 = centerY + radius * Math.sin(endAngle);
+
+          const largeArc = segment.endAngle - segment.startAngle > 180 ? 1 : 0;
+
+          const pathData = [
+            `M ${centerX} ${centerY}`,
+            `L ${x1} ${y1}`,
+            `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
+            'Z',
+          ].join(' ');
+
+          return (
+            <path
+              key={i}
+              d={pathData}
+              fill={segment.color}
+              stroke="rgba(255,255,255,0.3)"
+              strokeWidth={1}
+              className="transition-all cursor-pointer"
+              style={{
+                opacity:
+                  hoveredIndex === null || hoveredIndex === i ? 1 : 0.4,
+                transform:
+                  hoveredIndex === i ? 'scale(1.05)' : 'scale(1)',
+                transformOrigin: 'center',   // better for SVG
+                transformBox: 'fill-box',    // ensures scaling from the slice
+              }}
+              onMouseEnter={() => setHoveredIndex(i)}
+              onMouseLeave={() => setHoveredIndex(null)}
+            />
+          );
+        })}
+      </svg>
+
+      {/* Center label, now correctly positioned over the svg */}
+      {hoveredIndex !== null && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
+          <div className="text-xs font-semibold text-white">
+            {segments[hoveredIndex].ticker}
           </div>
-        )}
-      </div>
-      
-      <div className="w-full space-y-2">
-        {weights.map((w, i) => (
-          <div 
-            key={i} 
-            className="flex items-center justify-between text-sm transition-opacity cursor-pointer"
-            style={{ opacity: hoveredIndex === null || hoveredIndex === i ? 1 : 0.5 }}
-            onMouseEnter={() => setHoveredIndex(i)}
-            onMouseLeave={() => setHoveredIndex(null)}
-          >
-            <div className="flex items-center gap-2">
-              <div 
-                className="w-3 h-3 rounded-full" 
-                style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
-              />
-              <span className="font-medium text-white">{w.ticker}</span>
-            </div>
-            <span className="text-slate-300">{w.weight}%</span>
+          <div className="text-lg font-bold text-white">
+            {segments[hoveredIndex].percentage.toFixed(1)}%
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
-  );
+
+    {/* Legend / weights list */}
+    <div className="w-full space-y-2">
+      {weights.map((w, i) => (
+        <div
+          key={i}
+          className="flex items-center justify-between text-sm transition-opacity cursor-pointer"
+          style={{
+            opacity:
+              hoveredIndex === null || hoveredIndex === i ? 1 : 0.5,
+          }}
+          onMouseEnter={() => setHoveredIndex(i)}
+          onMouseLeave={() => setHoveredIndex(null)}
+        >
+          <div className="flex items-center gap-2">
+            <div
+              className="w-3 h-3 rounded-full"
+              style={{
+                backgroundColor:
+                  CHART_COLORS[i % CHART_COLORS.length],
+              }}
+            />
+            <span className="font-medium text-white">{w.ticker}</span>
+          </div>
+          <span className="text-slate-300">
+            {typeof w.weight === 'number'
+              ? `${w.weight.toFixed?.(1) ?? w.weight}%`
+              : w.weight}
+          </span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
 }
 
-function MetricBox({ label, value }: { label: string; value: string }) {
+// Simple metric box used in the summary grid
+function MetricBox({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+}) {
+  const display =
+    value === null || value === undefined
+      ? "—"
+      : typeof value === "number"
+      ? value.toString()
+      : value;
+
   return (
     <div className="rounded-xl border border-slate-500/30 bg-slate-700/30 p-4">
-      <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">{label}</div>
-      <div className="text-lg font-bold text-white">{value}</div>
+      <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">
+        {label}
+      </div>
+      <div className="text-lg font-bold text-white">{display}</div>
     </div>
   );
 }

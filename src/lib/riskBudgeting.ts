@@ -47,16 +47,18 @@ export function calculateReturns(prices: number[], dividends?: number[]): number
   // If no dividends provided, use price-only returns (backward compatible)
   if (!dividends || dividends.length === 0) {
     for (let i = 1; i < prices.length; i++) {
+      // Price return: (P_t - P_{t-1}) / P_{t-1}
       returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
     }
     return returns;
   }
   
-  // Calculate total returns (price + dividend)
+  // Calculate TOTAL returns: (P_t - P_{t-1} + D_t) / P_{t-1}
   for (let i = 1; i < prices.length; i++) {
-    const priceReturn = (prices[i] - prices[i - 1]) / prices[i - 1];
-    const dividendYield = dividends[i] / prices[i - 1]; // Dividend yield based on previous day's price
-    const totalReturn = priceReturn + dividendYield;
+    const pt = prices[i];
+    const ptPrev = prices[i - 1];
+    const dt = dividends[i] || 0;
+    const totalReturn = (pt - ptPrev + dt) / ptPrev;
     returns.push(totalReturn);
   }
   
@@ -430,4 +432,29 @@ export function calculateAverageCorrelation(corrMatrix: number[][]): string {
   
   const avg = count > 0 ? sum / count : 0;
   return avg.toFixed(2);
+}
+
+/**
+ * Ledoit–Wolf-style covariance shrinkage:
+ * Σ_λ = (1 - λ) Σ̂ + λ diag(Σ̂)
+ * 
+ * @param sampleCov - sample covariance matrix Σ̂
+ * @param lambda - shrinkage intensity in [0,1]
+ */
+export function shrinkCovariance(sampleCov: number[][], lambda: number = 0.1): number[][] {
+  const n = sampleCov.length;
+  if (n === 0) return sampleCov;
+  const lambdaClamped = Math.min(Math.max(lambda, 0), 1);
+  
+  const shrunk: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+  const diag: number[] = sampleCov.map((row, i) => row[i]);
+  
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const target = i === j ? diag[i] : 0;
+      shrunk[i][j] = (1 - lambdaClamped) * sampleCov[i][j] + lambdaClamped * target;
+    }
+  }
+  
+  return shrunk;
 }
