@@ -15,7 +15,7 @@ Frontend sends request to API
     ↓
 API fetches 5 years of price data from Yahoo Finance
     ↓
-API calculates optimal weights (Risk Budgeting)
+API calculates optimal weights (ERC or ES risk budgeting, with optional dividend reinvestment)
     ↓
 API runs backtest simulation
     ↓
@@ -33,7 +33,7 @@ Frontend displays charts and metrics
 ## 1. Historical Backtest
 
 ### **Purpose**
-Simulates how the portfolio would have performed over the past 5 years using actual market data.
+Simulates how the portfolio would have performed over the past 5 years using actual market data, using whichever optimizer you selected (ERC volatility-parity or ES tail-risk parity).
 
 ### **How It Works**
 
@@ -300,14 +300,15 @@ Off-diagonal: Correlation between assets
 
 ### API (`/src/app/api/risk-budgeting/route.ts`)
 ```
-1. Fetch historical data (Yahoo Finance)
+1. Fetch historical data (Yahoo Finance) with dividends
 2. Align price series across assets
-3. Calculate covariance matrix
-4. Optimize weights (Risk Budgeting)
-5. Run backtest
-6. Compare strategies
-7. Run stress tests
-8. Return comprehensive results
+3. Calculate returns/covariance (annualized)
+4. Optimize weights (ERC or ES) with optional custom budgets
+5. Apply optional volatility targeting
+6. Run backtest (quarterly re-opt using same optimizer and costs)
+7. Compare strategies (risk-budgeted vs equal weight + SPY)
+8. Run stress tests
+9. Return comprehensive results (weights, metrics, RC, rebalance timeline)
 ```
 
 ### Frontend (`/src/app/portfolio/full-analysis-option3/page.tsx`)

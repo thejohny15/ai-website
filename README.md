@@ -118,6 +118,7 @@ my-ai-app/
 
 ## 📊 Documentation
 
+- **[ERC & ES Risk-Budgeting Guide](./ERC_ES_README.md)** - Plain-English walkthrough of the optimizers, math, and how the API/backtest/front-end fit together
 - **[Advanced Analytics Guide](./ADVANCED_ANALYTICS_DOCS.md)** - Complete implementation details
 - **[Quick Reference](./ANALYTICS_QUICK_REFERENCE.md)** - Metrics cheat sheet
 
