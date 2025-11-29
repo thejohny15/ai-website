@@ -1073,6 +1073,9 @@ export default function PortfolioDetail() {
                 })()}.
               </p>
             </div>
+            <p className="mt-3 text-xs text-slate-400">
+              ERC ensures each asset resumes an equal risk contribution immediately after every rebalance.
+            </p>
           </>
         );
       } else {
@@ -1106,6 +1109,10 @@ export default function PortfolioDetail() {
                 })()}, when weights will be recalculated with updated market data.
               </p>
             </div>
+            <p className="mt-3 text-xs text-slate-400">
+              ERC starts every holding at the same risk contribution, so each sleeve carried an equal share
+              of portfolio volatility on day one.
+            </p>
           </>
         );
       }
@@ -1131,6 +1138,49 @@ export default function PortfolioDetail() {
             symbol: h.symbol,
             weight: h.weight
           })) || [];
+      
+      // For brand new portfolios (no rebalance history yet), suppress drift until we have at least
+      // one official market close after creation so that we don't show noise from intraday pricing.
+      const hasPostCreationClose = (() => {
+        if (lastRebalanceData) return true;
+        if (!sinceCreationMeta?.initialDate || !sinceCreationMeta?.mostRecentDate) return false;
+        const initial = new Date(sinceCreationMeta.initialDate);
+        const latest = new Date(sinceCreationMeta.mostRecentDate);
+        return latest.getTime() > initial.getTime();
+      })();
+
+      if (!lastRebalanceData && !hasPostCreationClose) {
+        const initialWeights = (p.proposalHoldings ?? []).map((h: any) => ({
+          ticker: h.symbol,
+          name: h.symbol,
+          weight: Number(h.weight).toFixed(2),
+          riskContribution: Number(h.weight).toFixed(2),
+        }));
+
+        return (
+          <>
+            <AllocationPieChart weights={initialWeights} />
+            <div className="mt-3 space-y-1">
+              {initialWeights.map((w: any, i: number) => (
+                <div key={i} className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300">{w.ticker}:</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-100">{w.weight}%</span>
+                    <span className="text-slate-400">(0.00%)</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 p-3 rounded-lg border border-blue-500/30 bg-blue-500/10">
+              <p className="text-xs text-blue-200">
+                First-day safeguard: we need a full market close before showing drift. 
+                After tonight's official close, this card will update automatically using the
+                previous day's closing prices.
+              </p>
+            </div>
+          </>
+        );
+      }
       
       // Get historical prices from last rebalance or initial creation snapshot
       const basePrices: Record<string, number> = lastRebalanceData?.pricesAtRebalance
@@ -1191,11 +1241,10 @@ export default function PortfolioDetail() {
     })()}
     <div className="mt-4 p-3 rounded-lg border border-amber-500/30 bg-amber-500/10">
       <p className="text-xs text-amber-200">
-        <strong>Live Drift:</strong> These weights change daily as stock prices move. 
-        Assets that outperform grow larger (positive drift), while underperformers shrink (negative drift). 
-        Compare this chart with the left chart to see how far your portfolio has drifted from its target allocation. 
-        At the next quarterly rebalance, the portfolio will be adjusted: winners will be sold (taking profits) 
-        and losers will be bought (buying the dip) to restore risk balance.
+        <strong>Official close drift:</strong> We recalculate these weights each evening using the most recent
+        market close. Compare them with the target allocation to spot how the portfolio moved during the last
+        session. At the next quarterly rebalance, the system will trim overweight positions and add to the
+        underweights to restore equal risk.
       </p>
     </div>
   </div>
@@ -1232,15 +1281,31 @@ export default function PortfolioDetail() {
                       ? sinceCreationRebalancingData[sinceCreationRebalancingData.length - 1]
                       : null;
                     
-                    const targetWeights = lastRebalanceData
+                    const targetAllocations = lastRebalanceData
                       ? lastRebalanceData.weightChanges.map((wc: any) => ({
                           symbol: wc.ticker || wc.symbol,
-                          targetWeight: parseFloat(wc.afterWeight)
+                          weight: parseFloat(wc.afterWeight)
                         }))
                       : p.proposalHoldings?.map((h: any) => ({
                           symbol: h.symbol,
-                          targetWeight: h.weight
+                          weight: h.weight
                         })) || [];
+                    
+                    // Latest recommended target weights (what should be done today)
+                    const todaysTargetMap = (p.proposalHoldings && p.proposalHoldings.length > 0
+                      ? p.proposalHoldings
+                      : targetAllocations).reduce((acc: Record<string, number>, item: any) => {
+                        const symbol = item.symbol || item.ticker;
+                        const weightValue = typeof item.weight === "number"
+                          ? item.weight
+                          : typeof item.targetWeight === "number"
+                            ? item.targetWeight
+                            : 0;
+                        if (symbol) {
+                          acc[symbol] = weightValue;
+                        }
+                        return acc;
+                      }, {} as Record<string, number>);
                     
                     const pricesAtRebalance: Record<string, number> =
                       lastRebalanceData?.pricesAtRebalance || sinceCreationMeta.initialPrices || {};
@@ -1249,12 +1314,12 @@ export default function PortfolioDetail() {
                     const lastRebalanceRiskContrib: Record<string, number> = lastRebalanceData?.riskContributions || {};
                     
                     // Calculate current metrics for each holding
-                    const holdings = targetWeights.map((tw: any) => {
-                      const currentPrice = getClosingPrice(tw.symbol);
-                      const rebalancePrice = pricesAtRebalance[tw.symbol] || currentPrice;
+                    const holdings = targetAllocations.map((allocation: any) => {
+                      const currentPrice = getClosingPrice(allocation.symbol);
+                      const rebalancePrice = pricesAtRebalance[allocation.symbol] || currentPrice;
                       
                       // Calculate shares and current value
-                      const initialValue = 10000 * (tw.targetWeight / 100);
+                      const initialValue = 10000 * (allocation.weight / 100);
                       const shares = rebalancePrice > 0 ? initialValue / rebalancePrice : 0;
                       const currentValue = shares * currentPrice;
                       
@@ -1264,8 +1329,8 @@ export default function PortfolioDetail() {
                         : 0;
                       
                       return {
-                        symbol: tw.symbol,
-                        targetWeight: tw.targetWeight,
+                        symbol: allocation.symbol,
+                        targetWeight: allocation.weight,
                         currentValue,
                         rebalancePrice,
                         currentPrice,
@@ -1277,7 +1342,8 @@ export default function PortfolioDetail() {
                     
                     return holdings.map((h: any, i: number) => {
                       const currentWeight = totalValue > 0 ? (h.currentValue / totalValue * 100) : h.targetWeight;
-                      const drift = currentWeight - h.targetWeight;
+                      const todaysTargetWeight = todaysTargetMap[h.symbol] ?? h.targetWeight ?? 0;
+                      const drift = currentWeight - todaysTargetWeight;
                       
                       // UPDATED LOGIC HERE: Use the Drifted Risk Contribution from state if available
                       // If available, this comes from the backend calculation (Euler decomp).
@@ -1289,7 +1355,7 @@ export default function PortfolioDetail() {
                       return (
                         <tr key={i} className="border-b border-slate-600/20 hover:bg-slate-700/30 transition">
                           <td className="py-3 pr-4 font-bold text-white">{h.symbol}</td>
-                          <td className="py-3 pr-4 text-right text-slate-300">{h.targetWeight.toFixed(2)}%</td>
+                          <td className="py-3 pr-4 text-right text-slate-300">{todaysTargetWeight.toFixed(2)}%</td>
                           <td className="py-3 pr-4 text-right font-semibold text-white">{currentWeight.toFixed(2)}%</td>
                           <td className="py-3 pr-4 text-right">
                             <span className={`font-semibold ${

@@ -151,10 +151,12 @@ export async function POST(req: NextRequest) {
     }
     
     const creationDateISO = creationDate.toISOString().split('T')[0];
-    const sliceStartIdx = Math.max(
-      0,
-      commonDates.findIndex(date => date >= creationDateISO)
-    );
+    let sliceStartIdx = commonDates.findIndex(date => date >= creationDateISO);
+    if (sliceStartIdx === -1) {
+      // No trading data on/after creation date yet (e.g., same-day creation before close),
+      // so anchor the slice to the latest available close.
+      sliceStartIdx = commonDates.length - 1;
+    }
     
     // STEP 3: Run backtest with fixed weights (SAME as risk-budgeting page)
     const targetWeights = weights.map((w: number) => w / 100);
@@ -217,7 +219,7 @@ export async function POST(req: NextRequest) {
     })) || [];
 
     // STEP 5: Capture initial and most recent price snapshots
-    const mostRecentDate = commonDates[commonDates.length - 1];
+    let mostRecentDate = commonDates[commonDates.length - 1];
     const todaysPrices: Record<string, number> = {};
     const initialPrices: Record<string, number> = {};
     symbols.forEach((symbol: string) => {
@@ -228,13 +230,25 @@ export async function POST(req: NextRequest) {
         initialPrices[symbol] = prices[initIdx];
       }
     });
+    const initialDate = commonDates[Math.min(sliceStartIdx, commonDates.length - 1)];
+
+    // If the portfolio is brand new and the market hasn't produced a close AFTER creation yet,
+    // keep today's prices equal to the initial snapshot so both charts match.
+    const hasPostCreationClose =
+      new Date(mostRecentDate).getTime() > new Date(creationDateISO).getTime();
+    if (!hasPostCreationClose) {
+      mostRecentDate = initialDate;
+      for (const symbol of Object.keys(initialPrices)) {
+        todaysPrices[symbol] = initialPrices[symbol];
+      }
+    }
 
     return NextResponse.json({
       rebalancingData,
       portfolioValues: backtest.portfolioValues,
       dates: backtest.dates,
       mostRecentDate,
-      initialDate: commonDates[Math.min(sliceStartIdx, commonDates.length - 1)],
+      initialDate,
       initialPrices,
       todaysPrices, // Today's closing prices for drift calculation
       currentRiskContributions: backtest.currentRiskContributions || {},
