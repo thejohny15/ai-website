@@ -6,6 +6,7 @@ An institutional-grade portfolio optimization platform using **Risk Budgeting** 
 
 ### **Portfolio Optimization**
 - ✅ Equal Risk Contribution (ERC) algorithm
+- ✅ Expected Shortfall (ES) optimizer with strict burn-in for stability
 - ✅ Custom Risk Budgets (specify exact risk allocation)
 - ✅ Volatility Targeting (leverage/cash adjustment)
 - ✅ 14 asset classes (Equities, Bonds, Commodities, Alternatives)
@@ -16,16 +17,17 @@ An institutional-grade portfolio optimization platform using **Risk Budgeting** 
 - 🚀 **Aggressive** - Growth-focused equity allocation
 
 ### **Advanced Analytics**
-- 📈 **Historical Backtest** - 5-year performance simulation
+- 📈 **Historical Backtest** - rolling lookback (1y/3y/5y) with quarterly re-estimation
 - 🔄 **Quarterly Rebalancing** - Automatic portfolio rebalancing
-- 📊 **Strategy Comparison** - Compare vs Equal Weight
+- 📊 **Strategy Comparison** - Compare vs Equal Weight + SPY benchmark overlay/metrics
 - 🔥 **Stress Testing** - Volatility shocks & crisis scenarios
 - 📉 **Max Drawdown Analysis** - Peak-to-trough decline tracking
 
 ### **Interactive Features**
 - 🎨 Beautiful charts (portfolio allocation, risk contribution, performance)
+- 📊 Live drifted risk contribution (recomputed nightly off latest close)
 - 💾 Save portfolios to dashboard
-- 📥 Download full JSON reports
+- 📥 Export polished PDF reports (current holdings, benchmarks, analytics)
 - 🔍 Hover tooltips with detailed metrics
 
 ## 🚀 Getting Started

@@ -1535,7 +1535,9 @@ export default function PortfolioDetail() {
                     return holdings.map((h: any, i: number) => {
                       const currentWeight = totalValue > 0 ? (h.currentValue / totalValue * 100) : h.targetWeight;
                       const todaysTargetWeight = todaysTargetMap[h.symbol] ?? h.targetWeight ?? 0;
-                      const drift = currentWeight - todaysTargetWeight;
+                      // Clamp tiny differences to zero to avoid showing "+0.00%" due to floating point noise
+                      const rawDrift = currentWeight - todaysTargetWeight;
+                      const drift = Math.abs(rawDrift) < 1e-4 ? 0 : rawDrift;
                       
                       // Risk contribution approximated with live drifted weights so we show the
                       // exposure each sleeve currently contributes (matches the drift pie).

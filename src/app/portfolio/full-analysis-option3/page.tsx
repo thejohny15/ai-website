@@ -51,6 +51,14 @@ function RiskBudgetingPageContent() {
   const [includeDividends, setIncludeDividends] = useState(true);
   const [optimizer, setOptimizer] = useState<"erc" | "es">("erc"); // NEW: optimization mode (ERC / ES)
 
+  const normalizedWeights = results
+    ? results.weights.map((w: any) => ({
+        ...w,
+        weight: parseFloat(String(w.weight)).toFixed(2),
+        riskContribution: parseFloat(String(w.riskContribution)).toFixed(2),
+      }))
+    : [];
+
   function toggleAsset(id: string) {
     setAssetClasses(prev =>
       prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a)
@@ -130,10 +138,20 @@ function RiskBudgetingPageContent() {
       const holdings = results.weights.map((w: any) => {
         const weightValue =
           typeof w.weightRaw === "number" ? w.weightRaw : parseFloat(w.weight);
+        const roundedWeight = Number.isFinite(weightValue)
+          ? parseFloat(weightValue.toFixed(2))
+          : 0;
+        const rcValue =
+          typeof w.riskContributionRaw === "number"
+            ? w.riskContributionRaw
+            : parseFloat(w.riskContribution);
+        const roundedRC = Number.isFinite(rcValue)
+          ? parseFloat(rcValue.toFixed(2))
+          : 0;
         return {
           symbol: w.ticker,
-          weight: weightValue,
-          note: `${w.name} • Risk Contribution: ${w.riskContribution}%`,
+          weight: roundedWeight,
+          note: `${w.name} • Risk Contribution: ${roundedRC.toFixed(2)}%`,
         };
       });
 
@@ -561,13 +579,13 @@ function RiskBudgetingPageContent() {
               {/* Allocation Pie Chart */}
               <div className="rounded-2xl border border-white/20 bg-white/10 p-6 backdrop-blur">
                 <h2 className="text-xl font-semibold mb-4">Portfolio Allocation</h2>
-                <AllocationPieChart weights={results.weights} />
+                <AllocationPieChart weights={normalizedWeights} />
               </div>
 
               {/* Risk Contribution Bar Chart */}
               <div className="rounded-2xl border border-white/20 bg-white/10 p-6 backdrop-blur">
                 <h2 className="text-xl font-semibold mb-4">Risk Contributions</h2>
-                <RiskContributionChart weights={results.weights} />
+                <RiskContributionChart weights={normalizedWeights} />
               </div>
             </div>
 
@@ -576,7 +594,7 @@ function RiskBudgetingPageContent() {
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold">Optimal Allocation</h2>
                 <span className="text-sm text-white/70">
-                  {results.weights.length} asset{results.weights.length !== 1 ? 's' : ''}
+                  {normalizedWeights.length} asset{normalizedWeights.length !== 1 ? 's' : ''}
                 </span>
               </div>
               
@@ -593,12 +611,12 @@ function RiskBudgetingPageContent() {
                     Lower-volatility assets get higher weights to contribute the same risk as higher-volatility assets.
                     {results.volatilityTargeting && parseFloat(results.volatilityTargeting.scalingFactor) > 1 && (
                       <span className="block mt-2">
-                        <strong>Leverage:</strong> Weights sum to {results.weights.reduce((sum: number, w: any) => sum + parseFloat(w.weight), 0).toFixed(0)}% due to volatility targeting (requires {results.volatilityTargeting.leverage}).
+                        <strong>Leverage:</strong> Weights sum to {displayWeights.reduce((sum: number, w: any) => sum + parseFloat(w.weight), 0).toFixed(0)}% due to volatility targeting (requires {results.volatilityTargeting.leverage}).
                       </span>
                     )}
                     {results.volatilityTargeting && parseFloat(results.volatilityTargeting.scalingFactor) < 1 && (
                       <span className="block mt-2">
-                        <strong>Cash Buffer:</strong> Weights sum to {results.weights.reduce((sum: number, w: any) => sum + parseFloat(w.weight), 0).toFixed(0)}% with {results.volatilityTargeting.leverage} to reduce volatility.
+                        <strong>Cash Buffer:</strong> Weights sum to {displayWeights.reduce((sum: number, w: any) => sum + parseFloat(w.weight), 0).toFixed(0)}% with {results.volatilityTargeting.leverage} to reduce volatility.
                       </span>
                     )}
                   </div>
@@ -620,16 +638,16 @@ function RiskBudgetingPageContent() {
                       <tr key={item.ticker} className="border-b border-white/10">
                         <td className="py-3 pr-6 font-semibold">{item.name}</td>
                         <td className="py-3 pr-6 text-white/80">{item.ticker}</td>
-                        <td className="py-3 pr-6 text-right font-semibold">{item.weight}%</td>
+                        <td className="py-3 pr-6 text-right font-semibold">{parseFloat(item.weight).toFixed(2)}%</td>
                         <td className="py-3 text-right">
                           <div className="flex items-center justify-end gap-2">
                             <div className="h-2 rounded-full bg-white/20 w-20">
                               <div
                                 className="h-full rounded-full bg-emerald-400"
-                                style={{ width: `${item.riskContribution}%` }}
+                                style={{ width: `${parseFloat(item.riskContribution).toFixed(2)}%` }}
                               />
                             </div>
-                            <span className="font-semibold">{item.riskContribution}%</span>
+                            <span className="font-semibold">{parseFloat(item.riskContribution).toFixed(2)}%</span>
                           </div>
                         </td>
                       </tr>

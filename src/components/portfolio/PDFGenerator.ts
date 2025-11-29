@@ -30,10 +30,18 @@ interface BacktestResults {
   rebalanceCount?: number;
   dividendCash?: number;
   dividendCashIfReinvested?: number;
+  portfolioValues?: number[];
   dates?: string[];
   maxDrawdownPeriod?: {
     start?: string;
     end?: string;
+  };
+  benchmark?: { ticker: string; values: number[]; dates?: string[] };
+  benchmarkMetrics?: {
+    totalReturn: string;
+    annualizedReturn: string;
+    annualizedVolatility: string;
+    sharpeRatio: string;
   };
 }
 

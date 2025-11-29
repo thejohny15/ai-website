@@ -206,6 +206,8 @@ export async function POST(req: NextRequest) {
     const totalPoints = Array.from(alignedPrices.values())[0].length;
     const splitPoint = Math.floor(totalPoints / 2);
 
+    // --- Split in-sample (for initial weights) vs out-of-sample (for today + backtest) ---
+
     const backtestWeightsPrices = new Map<string, number[]>();
     for (const [ticker, prices] of alignedPrices.entries()) {
       backtestWeightsPrices.set(ticker, prices.slice(0, splitPoint));
@@ -231,6 +233,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // --- In-sample covariance for initial weights ---
+
     const backtestWeightsReturns: number[][] = [];
     const backtestTickers: string[] = [];
     for (const asset of assetClasses) {
@@ -246,13 +250,17 @@ export async function POST(req: NextRequest) {
       ? customBudgets.map((b: number) => b / 100)
       : equalBacktestBudgets;
 
+    // --- Initial weights (in-sample) ---
+
     let backtestInitialWeights: number[];
     if (optimizer === "es") {
+      // For pure ES risk-parity, μ is unused in the objective,
+      // but we pass annualized returns for interface compatibility.
       const muAnnualOlder = backtestWeightsReturns.map((arr) => {
         const m = arr.reduce((s, v) => s + v, 0) / Math.max(arr.length, 1);
         return m * 252;
       });
-      // ES optimizer: 5% tail cutoff is handled inside optimizeExpectedShortfall
+
       const esOptOlder = optimizeExpectedShortfall({
         mu: muAnnualOlder,
         sigma: backtestCovMatrix,
@@ -269,6 +277,8 @@ export async function POST(req: NextRequest) {
       );
       backtestInitialWeights = ercOptOlder.weights;
     }
+
+    // --- Out-of-sample "today" stats (for portfolio suggestion now) ---
 
     const priceReturnsData: number[][] = [];
     const totalReturnsData: number[][] = [];
@@ -303,12 +313,15 @@ export async function POST(req: NextRequest) {
       ? customBudgets.map((b: number) => b / 100)
       : equalBudgets;
 
+    // --- Main optimization (today) ---
+
     let optimization: any;
 
     if (optimizer === "es") {
-      // Main ES optimization: 5% tail cutoff is handled inside optimizeExpectedShortfall
+      // Pure ES risk-parity: ES + λ * ||RC_share - budgets||²
+      // 5% tail cutoff is hard-coded inside optimizeExpectedShortfall.
       optimization = optimizeExpectedShortfall({
-        mu: meanReturns,
+        mu: meanReturns, // not used in objective, only for shape/validation
         sigma: covMatrix,
         budgets: targetBudgets,
         budgetStrength: 400,
@@ -318,7 +331,8 @@ export async function POST(req: NextRequest) {
       optimization = optimizeERC(covMatrix, 1000, 1e-6, targetBudgets);
     }
 
-    // FIX: Cast to number[] to ensure TypeScript infers type correctly
+    // --- Volatility / leverage scaling ---
+
     const baseWeights = optimization.weights as number[];
     const portfolioVol =
       optimizer === "es"
@@ -340,6 +354,8 @@ export async function POST(req: NextRequest) {
     const targetedVol = targetVolatility || naturalVol;
     const sharpeRatio = calculateSharpeRatio(expectedReturn, targetedVol);
 
+    // --- Max drawdown (per-asset, approximated portfolio) ---
+
     const maxDrawdowns = assetClasses.map((asset: AssetClass) => {
       const prices = alignedPrices.get(asset.ticker)!;
       return calculateMaxDrawdown(prices);
@@ -350,7 +366,8 @@ export async function POST(req: NextRequest) {
         0
       ) * scalingFactor;
 
-    // Compute drifted "current" weights and risk contributions as of last close
+    // --- Drifted current weights & RC (at last out-of-sample date) ---
+
     let currentWeights: number[] = [];
     let currentRiskContributions: number[] = [];
     let currentRiskContributionShares: number[] = [];
@@ -382,7 +399,8 @@ export async function POST(req: NextRequest) {
         (v) => v / finalTotal
       );
 
-      // Risk contributions using the Euler decomposition: RC_i = w_i * (Sigma * w)_i / TotalVariance
+      // Risk contributions using Euler (variance-based RC).
+      // For ES mode, these are still useful as a sanity check on drift.
       const sigmaW = covMatrix.map((row) =>
         row.reduce(
           (sum, value, idx) => sum + value * currentWeights[idx],
@@ -414,33 +432,33 @@ export async function POST(req: NextRequest) {
       currentRiskContributionShares = finalWeights;
     }
 
-    // Format results
-    const weights = assetClasses.map(
-      (asset: AssetClass, i: number) => ({
+    // --- Format weights for frontend ---
+
+    // For ES, use target budgets as the “target” RC to avoid noisy numerical drift.
+    // For ERC, use the optimizer's RC output.
+    const weights = assetClasses.map((asset: AssetClass, i: number) => {
+      const targetWeightPct = (finalWeights[i] * 100).toFixed(2);
+      const rcPct =
+        optimizer === "es"
+          ? ((targetBudgets[i] ?? 1 / nAssets) * 100).toFixed(2)
+          : (optimization as any).riskContributions[i].toFixed(2);
+
+      return {
         name: asset.name,
         ticker: asset.ticker,
-        // Provide both display and raw weights to avoid precision loss downstream
-        weight: (finalWeights[i] * 100).toFixed(2),
+        weight: targetWeightPct,
         weightRaw: finalWeights[i] * 100,
-        riskContribution:
-          optimizer === "es"
-            ? (
-                ((optimization as any).riskContributionShares?.[i] ??
-                  0) * 100
-              ).toFixed(2)
-            : (optimization as any).riskContributions[i].toFixed(2),
+        riskContribution: rcPct,
         riskContributionRaw:
           optimizer === "es"
-            ? (((optimization as any)
-                .riskContributionShares?.[i] ?? 0) * 100)
+            ? (targetBudgets[i] ?? 1 / nAssets) * 100
             : (optimization as any).riskContributions[i],
         currentWeight: (currentWeights[i] * 100).toFixed(2),
-        // Drifted Current RC
-        currentRiskContribution:
-          currentRiskContributions[i].toFixed(2),
+        // Drifted Current RC (variance-based)
+        currentRiskContribution: currentRiskContributions[i].toFixed(2),
         currentRiskContributionRaw: currentRiskContributions[i],
-      })
-    );
+      };
+    });
 
     const metrics = {
       portfolioVolatility: (targetedVol * 100).toFixed(2),
@@ -463,6 +481,8 @@ export async function POST(req: NextRequest) {
       calculateAverageCorrelation(correlationMatrix);
 
     console.log("Running historical backtest...");
+
+    // --- Backtest (using same optimizer flag) ---
 
     const backtestDateArray =
       historicalData[0].dates.slice(splitPoint);
@@ -494,8 +514,8 @@ export async function POST(req: NextRequest) {
       outputStartIdx
     );
 
-    // Build SPY benchmark series on the same date axis (normalized to 10k) and metrics,
-    // using the same burn-in slice as the backtest outputs
+    // --- SPY benchmark (aligned to backtest window / burn-in) ---
+
     let benchmarkSeries:
       | { ticker: string; values: number[]; dates: string[] }
       | undefined;
@@ -540,6 +560,8 @@ export async function POST(req: NextRequest) {
       };
     }
 
+    // --- Equal-weight vs risk-budgeted comparison ---
+
     const comparison = compareStrategies(
       pricesForBacktest,
       dividendsForBacktest,
@@ -554,11 +576,15 @@ export async function POST(req: NextRequest) {
       outputStartIdx
     );
 
+    // --- Worst 30-day period ---
+
     const worstPeriod = findWorstPeriod(
       backtest.portfolioValues,
       backtest.dates,
       30
     );
+
+    // --- Dividend contribution analytics ---
 
     let dividendContribution;
     const avgDividendYields = tickers.map((ticker, i) => {
@@ -596,6 +622,8 @@ export async function POST(req: NextRequest) {
       })),
       calculatedOver: `${lookbackPeriod} backtest period`,
     };
+
+    // --- Final JSON response ---
 
     return NextResponse.json({
       weights,
