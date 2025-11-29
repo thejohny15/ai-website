@@ -5,17 +5,22 @@ import { useState } from "react";
 interface PerformanceChartProps {
   values: number[];
   dates: string[];
+  benchmark?: { label: string; values: number[] };
 }
 
-export function PerformanceChart({ values, dates }: PerformanceChartProps) {
+export function PerformanceChart({ values, dates, benchmark }: PerformanceChartProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   
   const sampleRate = Math.ceil(values.length / 250);
   const sampledValues = values.filter((_, i) => i % sampleRate === 0);
   const sampledDates = dates.filter((_, i) => i % sampleRate === 0);
+  const sampledBenchmark =
+    benchmark?.values?.length
+      ? benchmark.values.filter((_, i) => i % sampleRate === 0)
+      : null;
   
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
+  const minValue = Math.min(...values, ...(sampledBenchmark ?? values));
+  const maxValue = Math.max(...values, ...(sampledBenchmark ?? values));
   const range = maxValue - minValue;
   const padding = range * 0.1;
   
@@ -34,6 +39,15 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
     const y = topMargin + chartHeight * (1 - normalizedValue);
     return { x, y, value, date: sampledDates[i] };
   });
+  const benchmarkPoints =
+    sampledBenchmark && sampledBenchmark.length === sampledDates.length
+      ? sampledBenchmark.map((value, i) => {
+          const x = leftMargin + (i / (sampledBenchmark.length - 1)) * chartWidth;
+          const normalizedValue = (value - minValue + padding) / (range + 2 * padding);
+          const y = topMargin + chartHeight * (1 - normalizedValue);
+          return { x, y, value, date: sampledDates[i] };
+        })
+      : null;
   
   const maxPoint = points.reduce((max, p) => p.value > max.value ? p : max, points[0]);
   const minPoint = points.reduce((min, p) => p.value < min.value ? p : min, points[0]);
@@ -57,6 +71,10 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
   }
   
   const pathData = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+  const benchmarkPath =
+    benchmarkPoints && benchmarkPoints.length > 1
+      ? benchmarkPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+      : null;
   
   return (
     <div className="relative">
@@ -138,7 +156,30 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
             <stop offset="0%" stopColor="#10b981" stopOpacity="0.5" />
             <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
           </linearGradient>
+          <linearGradient id="benchmarkGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="#60a5fa" stopOpacity="0" />
+          </linearGradient>
         </defs>
+
+        {benchmarkPath && benchmarkPoints && (
+          <>
+            <path
+              d={`${benchmarkPath} L ${width - rightMargin} ${topMargin + chartHeight} L ${leftMargin} ${topMargin + chartHeight} Z`}
+              fill="url(#benchmarkGradient)"
+              opacity="0.25"
+            />
+            <path
+              d={benchmarkPath}
+              fill="none"
+              stroke="#60a5fa"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeDasharray="6 4"
+            />
+          </>
+        )}
         
         {hoveredIndex !== null && points[hoveredIndex] && (
           <circle
@@ -146,6 +187,16 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
             cy={points[hoveredIndex].y}
             r="4"
             fill="#10b981"
+            stroke="white"
+            strokeWidth="2"
+          />
+        )}
+        {hoveredIndex !== null && benchmarkPoints && benchmarkPoints[hoveredIndex] && (
+          <circle
+            cx={benchmarkPoints[hoveredIndex].x}
+            cy={benchmarkPoints[hoveredIndex].y}
+            r="4"
+            fill="#60a5fa"
             stroke="white"
             strokeWidth="2"
           />
@@ -158,10 +209,15 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
           style={{
             left: `${(points[hoveredIndex].x / width) * 100}%`,
             top: `${(points[hoveredIndex].y / height) * 100}%`,
-            transform: 'translate(-50%, -120%)',
+            transform: 'translate(-50%, -140%)',
           }}
         >
-          <div className="font-semibold">${points[hoveredIndex].value.toFixed(2)}</div>
+          <div className="font-semibold">Portfolio: ${points[hoveredIndex].value.toFixed(2)}</div>
+          {benchmarkPoints && benchmarkPoints[hoveredIndex] && (
+            <div className="font-semibold text-blue-200">
+              {benchmark?.label || "Benchmark"}: ${benchmarkPoints[hoveredIndex].value.toFixed(2)}
+            </div>
+          )}
           <div className="text-xs text-white/70">{points[hoveredIndex].date}</div>
         </div>
       )}
@@ -183,8 +239,17 @@ export function PerformanceChart({ values, dates }: PerformanceChartProps) {
         onMouseLeave={() => setHoveredIndex(null)}
       />
       
-      <div className="mt-2 text-center text-sm text-white/70">
-        Portfolio Value Over Time
+      <div className="mt-3 flex justify-center gap-4 text-sm text-white/80">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-3 h-3 rounded-full bg-emerald-400"></span>
+          Portfolio
+        </div>
+        {benchmark && (
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-3 h-3 rounded-full bg-blue-400"></span>
+            {benchmark.label || "Benchmark"}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,31 +1,35 @@
-
-
-
 "use strict";
 
 // Expected Shortfall (Gaussian / Normal approximation) with TRUE ES risk budgeting.
-// We minimize
-//   ES(w) + λ * Σ_i (RC_share_i(w) - b_i)^2
-// where RC_share_i are *tail-risk* contribution shares of the kα*sqrt(w'Σw) term.
-// This enforces equal (or budgeted) tail-risk contributions.
 //
-// Long-only, fully-invested. Optional caps. AI params kept for backwards compatibility
-// but not used (aiShadowPrice returned null).
+// We minimize
+//    ES(w) + λ * Σ_i (RC_share_i(w) - b_i)^2
+//
+// where ES(w) is a 1-sided Gaussian ES at α = 0.95 (5% tail cutoff),
+// and RC_share_i are the *tail-risk* contribution shares of the
+// kα * sqrt(w' Σ w) term.
+//
+// This enforces (soft) equal or budgeted tail-risk contributions:
+// higher tail risk (fatter tails / higher variance) => lower optimal weight.
+//
+// Long-only, fully-invested, optional caps.
+// NOTE: alpha is now effectively HARD-CODED to 5% tail (α = 0.95).
+// Any alpha passed in options is ignored to match Alexandre’s spec.
 
 export interface ESOptimizerOptions {
-  mu: number[];
-  sigma: number[][];
-  alpha?: number;                // default 0.975
-  budgets?: number[];            // risk budgets b_i, sum to 1. If omitted, no RB penalty.
-  budgetStrength?: number;       // λ >= 0. If budgets provided and λ not set, defaults to 0.5.
+  mu: number[];                 // vector of expected returns (not strictly needed for pure ES, but kept)
+  sigma: number[][];           // covariance matrix
+  alpha?: number;              // IGNORED: ES tail is fixed at 5% (0.95 quantile)
+  budgets?: number[];          // risk budgets b_i, sum to 1. If omitted, no RB penalty.
+  budgetStrength?: number;     // λ >= 0. If budgets provided and λ not set, defaults to 0.5.
   caps?: (number | null | undefined)[];
-  aiIndex?: number;
-  aiCap?: number;
+  aiIndex?: number;            // kept for backwards compatibility (not used)
+  aiCap?: number;              // kept for backwards compatibility (not used)
   initialWeights?: number[];
-  maxIterations?: number;        // default 500
-  tolerance?: number;            // default 1e-8
-  armijoBeta?: number;           // default 0.5
-  armijoSigma?: number;          // default 1e-4
+  maxIterations?: number;      // default 500
+  tolerance?: number;          // default 1e-8
+  armijoBeta?: number;         // default 0.5
+  armijoSigma?: number;        // default 1e-4
 }
 
 export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
@@ -35,17 +39,25 @@ export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
   const sigma = opts.sigma;
   const n = mu.length;
 
-  const alpha = opts.alpha ?? 0.975;
+  // HARD-CODED 5% tail cutoff: α = 0.95 (one-sided ES at 5% worst outcomes).
+  const alpha = 0.95;
   const kAlpha = normalPdf(invNormCdf(alpha)) / (1 - alpha);
 
+  // upper bounds (caps) on weights; default is +∞
   const upperBounds = (opts.caps ?? Array(n).fill(undefined)).map(c =>
     c == null ? Infinity : Math.max(0, c)
   );
 
+  // risk-budget vector b_i (normalized to sum to 1), or null if not provided / invalid
   const budgets = normalizeBudgets(opts.budgets, n);
+
+  // strength of risk-budget penalty; larger λ => closer to exact ERC
   const lambda = budgets ? Math.max(0, opts.budgetStrength ?? 0.5) : 0;
 
-  // start
+  // starting point:
+  //   - if initialWeights given: project them to feasible simplex with caps
+  //   - else if budgets: start from budgets
+  //   - else: equal weights
   let x = opts.initialWeights && opts.initialWeights.length === n
     ? projectFeasible(opts.initialWeights, upperBounds)
     : budgets
@@ -62,6 +74,7 @@ export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
   let converged = false;
   let iterations = 0;
 
+  // Simple projected gradient descent with Armijo backtracking line search
   for (iterations = 0; iterations < maxIterations; iterations++) {
     const grad = objectiveGradient(x, mu, sigma, kAlpha, budgets, lambda);
     const gradNorm = Math.sqrt(dot(grad, grad));
@@ -77,8 +90,10 @@ export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
     for (let ls = 0; ls < 50; ls++) {
       let candidate = subtract(x, scale(grad, step));
       candidate = projectFeasible(candidate, upperBounds);
+
       const fxCand = evaluateObjective(candidate, mu, sigma, kAlpha, budgets, lambda);
 
+      // Armijo condition
       if (fxCand <= fx - armijoSigma * step * gradNorm * gradNorm) {
         x = candidate;
         fx = fxCand;
@@ -88,6 +103,7 @@ export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
       step *= armijoBeta;
     }
 
+    // If line search fails, stop
     if (!accepted) break;
   }
 
@@ -99,15 +115,15 @@ export function optimizeExpectedShortfall(opts: ESOptimizerOptions) {
 
   return {
     weights: x,
-    expectedShortfall: fx,
+    expectedShortfall: fx,           // objective value: ES + λ * penalty
     kAlpha,
-    riskContributions: rcTail,
-    riskContributionShares: rcTailShares,
+    riskContributions: rcTail,       // tail-risk contributions RC_i
+    riskContributionShares: rcTailShares, // RC_i / Σ_j RC_j
     entropy,
     diversification,
     iterations,
     converged,
-    aiShadowPrice: null,
+    aiShadowPrice: null,             // legacy field, unused
   };
 }
 
@@ -121,11 +137,15 @@ function evaluateObjective(
   budgets: number[] | null,
   lambda: number
 ): number {
+  // variance and stdev of portfolio
   const variance = Math.max(quadraticForm(w, sigma), 1e-16);
   const stdev = Math.sqrt(variance);
+
+  // ES(w) = -E[r] + kα * σ  (Gaussian, 1-sided at α = 0.95)
   const mean = dot(mu, w);
   let es = -mean + kAlpha * stdev;
 
+  // Penalty to enforce equal/budgeted tail-risk contributions
   if (budgets && lambda > 0) {
     const { rcTailShares } = tailRiskContributions(w, sigma, kAlpha);
     let pen = 0;
@@ -146,7 +166,11 @@ function objectiveGradient(
   budgets: number[] | null,
   lambda: number
 ): number[] {
-  // Gradient of ES term: -mu + kAlpha / ||w||_Σ * Σ w
+  // Gradient of Gaussian ES term:
+  //
+  // ES(w) = -μᵀw + kα * sqrt(wᵀΣw)
+  // ∂ES/∂w = -μ + kα * Σw / ||w||_Σ
+  //
   const sw = matVec(sigma, w);
   const variance = Math.max(dot(w, sw), 1e-16);
   const stdev = Math.sqrt(variance);
@@ -155,7 +179,8 @@ function objectiveGradient(
   const grad = mu.map((m, i) => -m + scaleTail * sw[i]);
 
   // Heuristic gradient for RC-share penalty.
-  // Exact derivative is messy; this smooth approximation works well in practice.
+  // Exact derivative of risk contributions w.r.t. weights is messy,
+  // but this smooth approximation works well in practice.
   if (budgets && lambda > 0) {
     const { rcTailShares } = tailRiskContributions(w, sigma, kAlpha);
     for (let i = 0; i < w.length; i++) {
@@ -166,7 +191,11 @@ function objectiveGradient(
   return grad;
 }
 
-// ---------- Tail-risk contributions ----------
+// ---------- Tail-risk contributions (for ES term) ----------
+//
+// Tail-risk component of ES is kα * sqrt(wᵀΣw).
+// Marginal contribution ∂(kα * σ)/∂w_i = kα * (Σw)_i / σ.
+// Risk contribution RC_i = w_i * ∂ES_tail/∂w_i.
 
 function tailRiskContributions(w: number[], sigma: number[][], kAlpha: number) {
   const sw = matVec(sigma, w);
@@ -194,7 +223,7 @@ function normalizeBudgets(budgets: number[] | undefined, n: number): number[] | 
   return budgets.map(b => b / s);
 }
 
-// ---------- Projection onto capped simplex ----------
+// ---------- Projection onto capped simplex (long-only, sum=1, 0 ≤ w_i ≤ cap_i) ----------
 
 function projectFeasible(w: number[], upperBounds: number[]): number[] {
   const n = w.length;
@@ -272,12 +301,13 @@ function computeEntropy(w: number[]): number {
   return h;
 }
 
-// ---------- Normal distribution ----------
+// ---------- Normal distribution helpers ----------
 
 function normalPdf(z: number): number {
   return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
 }
 
+// Approximate inverse CDF for standard normal
 function invNormCdf(p: number): number {
   if (p <= 0 || p >= 1) throw new Error("p must be in (0,1)");
   const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,

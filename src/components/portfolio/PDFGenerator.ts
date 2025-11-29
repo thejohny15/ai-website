@@ -154,15 +154,20 @@ function drawValueLineChart(
     max = Math.max(max, ...secondaryValues);
   }
   const range = Math.max(max - min, 1);
+  // Add a bit more breathing room but keep labels aligned below the timeline
+  const paddedRange = range * 1.15;
+  const paddedMin = min - range * 0.08;
+  const paddedMax = paddedMin + paddedRange;
+
   let minIndex = 0;
   let maxIndex = 0;
   doc.setLineWidth(1.5);
   doc.setDrawColor(...color);
   let prevX = x;
-  let prevY = y + height - ((values[0] - min) / range) * height;
+  let prevY = y + height - ((values[0] - paddedMin) / paddedRange) * height;
   for (let i = 1; i < values.length; i++) {
     const currX = x + (i / (values.length - 1)) * width;
-    const currY = y + height - ((values[i] - min) / range) * height;
+    const currY = y + height - ((values[i] - paddedMin) / paddedRange) * height;
     doc.line(prevX, prevY, currX, currY);
     if (values[i] < values[minIndex]) minIndex = i;
     if (values[i] > values[maxIndex]) maxIndex = i;
@@ -176,10 +181,10 @@ function drawValueLineChart(
     doc.setDrawColor(...secondaryColor);
     doc.setLineDashPattern(secondaryDash, 0);
     let prevSX = x;
-    let prevSY = y + height - ((secondaryValues[0] - min) / range) * height;
+    let prevSY = y + height - ((secondaryValues[0] - paddedMin) / paddedRange) * height;
     for (let i = 1; i < secondaryValues.length; i++) {
       const currX = x + (i / denom) * width;
-      const currY = y + height - ((secondaryValues[i] - min) / range) * height;
+      const currY = y + height - ((secondaryValues[i] - paddedMin) / paddedRange) * height;
       doc.line(prevSX, prevSY, currX, currY);
       prevSX = currX;
       prevSY = currY;
@@ -187,14 +192,20 @@ function drawValueLineChart(
     doc.setLineDashPattern([], 0);
   }
 
+  // subtle baseline
+  doc.setDrawColor(226, 232, 240);
+  doc.setLineWidth(0.75);
+  doc.line(x, y + height + 6, x + width, y + height + 6);
+  doc.setDrawColor(...color);
+
   // min/max labels positioned along the curve
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  doc.setTextColor(71, 85, 105);
+  doc.setFontSize(10);
+  doc.setTextColor(51, 65, 85);
   const minX = x + (minIndex / (values.length - 1 || 1)) * width;
-  const minY = y + height - ((values[minIndex] - min) / range) * height;
+  const minY = y + height - ((values[minIndex] - paddedMin) / paddedRange) * height;
   const maxX = x + (maxIndex / (values.length - 1 || 1)) * width;
-  const maxY = y + height - ((values[maxIndex] - min) / range) * height;
+  const maxY = y + height - ((values[maxIndex] - paddedMin) / paddedRange) * height;
 
   const drawCurrencyLabel = (
     label: string,
@@ -218,22 +229,39 @@ function drawValueLineChart(
     });
   };
 
-  drawCurrencyLabel(formatCurrency(values[minIndex]), minX + 4, minY, "left");
-  drawCurrencyLabel(formatCurrency(values[maxIndex]), maxX - 4, maxY, "right");
+  drawCurrencyLabel(formatCurrency(values[minIndex]), minX + 6, minY + 2, "left");
+  drawCurrencyLabel(formatCurrency(values[maxIndex]), maxX - 6, maxY + 2, "right");
 
   // timeline labels
+  let timelineBottom = y + height;
   if (dates && dates.length > 0) {
     const firstDate = dates[0];
     const lastDate = dates[dates.length - 1];
-    const timelineY = y + height + 26;
+    const timelineY = y + height + 18; // closer to the chart, dates directly under
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(71, 85, 105);
-    doc.text(firstDate || "Start", x, timelineY);
-    const lastWidth = doc.getTextWidth(lastDate || "Today");
-    doc.text(lastDate || "Today", x + width - lastWidth, timelineY);
+    doc.setFontSize(10);
+    doc.setTextColor(51, 65, 85);
+
+    const drawDatePill = (label: string, posX: number, align: "left" | "right") => {
+      const padding = 5;
+      const textW = doc.getTextWidth(label);
+      const pillW = textW + padding * 2;
+      const pillH = 14;
+      const pillX = align === "right" ? posX - pillW : posX;
+      const pillY = timelineY - 6; // drop slightly to separate from line
+      doc.setFillColor(241, 245, 249);
+      doc.roundedRect(pillX, pillY, pillW, pillH, 3, 3, "F");
+      const textX = align === "right" ? posX - padding : pillX + padding;
+      doc.setTextColor(71, 85, 105);
+      doc.text(label, textX, pillY + pillH - 4, { align: align === "right" ? "right" : "left" });
+    };
+
+    drawDatePill(firstDate || "Start", x, "left");
+    drawDatePill(lastDate || "Today", x + width, "right");
+    timelineBottom = timelineY + 10;
   }
 
-  return y + height;
+  return timelineBottom;
 }
 
 export async function generatePortfolioPDF(
@@ -277,7 +305,7 @@ export async function generatePortfolioPDF(
   doc.setFontSize(12);
 
   // Strategy summary block
-  const summaryTop = 110;
+  const summaryTop = 96;
   const summaryHeight = 80;
   doc.setFillColor(240, 253, 244);
   doc.roundedRect(margin, summaryTop, docWidth - margin * 2, summaryHeight, 10, 10, "F");
@@ -404,6 +432,22 @@ export async function generatePortfolioPDF(
     }
 
     if (results.performanceSinceCreationSeries?.length) {
+      // Guard: if series is flat/empty (all zeros or single point), skip rendering
+      const hasData = results.performanceSinceCreationSeries.some(
+        (p) => Number.isFinite(p.portfolioValue) && Math.abs(p.portfolioValue) > 0
+      );
+      if (!hasData || results.performanceSinceCreationSeries.length < 2) {
+        // Still advance spacing minimally
+        if (startY > pageHeight - 120) {
+          doc.addPage();
+          startY = margin;
+        }
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(12);
+        doc.setTextColor(88, 28, 135);
+        doc.text("Performance Since Portfolio Creation", margin, startY);
+        startY += 18;
+      } else {
       if (startY > pageHeight - 260) {
         doc.addPage();
         startY = margin;
@@ -425,7 +469,7 @@ export async function generatePortfolioPDF(
       doc.text("Performance Since Portfolio Creation", margin, startY);
       startY += 12;
 
-      const chartHeight = 180;
+      const chartHeight = 200;
       startY =
         drawValueLineChart(doc, {
           values: creationValues,
@@ -483,7 +527,8 @@ export async function generatePortfolioPDF(
         );
       }
 
-      startY = legendY + 26;
+      startY = legendY + 28;
+      }
     }
 
     if (results.currentPerformanceSeries?.length) {

@@ -568,13 +568,46 @@ export default function PortfolioDetail() {
       };
       const performanceSinceCreationSeries =
         await fetchPerformanceSinceCreationSeries();
-      const weights = (p.proposalHoldings ?? []).map((holding) => {
+      // Derive current (drifted) weights for PDF using initial/today prices
+      const basePortfolioValue = 10000;
+      const currentHoldingsForPdf = (p.proposalHoldings ?? []).map((holding) => {
         const nameFromNote = holding.note?.split(" • ")[0];
+        const initialPrice =
+          sinceCreationMeta.initialPrices?.[holding.symbol] ??
+          sinceCreationMeta.todaysPrices?.[holding.symbol] ??
+          quotes[holding.symbol]?.price ??
+          0;
+        const todayPrice =
+          sinceCreationMeta.todaysPrices?.[holding.symbol] ??
+          quotes[holding.symbol]?.price ??
+          initialPrice;
+        const shares =
+          initialPrice && initialPrice > 0
+            ? (basePortfolioValue * (holding.weight / 100)) / initialPrice
+            : 0;
+        const currentValue = shares * (todayPrice || 0);
         return {
           name: nameFromNote || holding.symbol,
           ticker: holding.symbol,
-          weight: holding.weight,
-          riskContribution: currentRiskContributions[holding.symbol],
+          targetWeight: holding.weight,
+          currentValue,
+        };
+      });
+      const totalCurrentValue = currentHoldingsForPdf.reduce(
+        (sum, h) => sum + (h.currentValue || 0),
+        0
+      );
+      const weights = currentHoldingsForPdf.map((h) => {
+        const currentWeight =
+          totalCurrentValue > 0
+            ? (h.currentValue / totalCurrentValue) * 100
+            : h.targetWeight;
+        const rc = currentRiskContributions[h.ticker] ?? currentWeight;
+        return {
+          name: h.name,
+          ticker: h.ticker,
+          weight: currentWeight,
+          riskContribution: rc,
         };
       });
 

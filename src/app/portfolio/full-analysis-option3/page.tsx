@@ -669,8 +669,35 @@ function RiskBudgetingPageContent() {
                     <PerformanceChart 
                       values={results.analytics.backtest.portfolioValues} 
                       dates={results.analytics.backtest.dates}
+                      benchmark={
+                        results.analytics.backtest.benchmark
+                          ? { label: results.analytics.backtest.benchmark.ticker, values: results.analytics.backtest.benchmark.values }
+                          : undefined
+                      }
                     />
                   </div>
+
+                  {/* Benchmark Metrics */}
+                  {results.analytics.backtest.benchmarkMetrics && (
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
+                      <MetricCard
+                        label="SPY Total Return"
+                        value={`${results.analytics.backtest.benchmarkMetrics.totalReturn}%`}
+                      />
+                      <MetricCard
+                        label="SPY Ann. Return"
+                        value={`${results.analytics.backtest.benchmarkMetrics.annualizedReturn}%`}
+                      />
+                      <MetricCard
+                        label="SPY Ann. Volatility"
+                        value={`${results.analytics.backtest.benchmarkMetrics.annualizedVolatility}%`}
+                      />
+                      <MetricCard
+                        label="SPY Sharpe Ratio"
+                        value={results.analytics.backtest.benchmarkMetrics.sharpeRatio}
+                      />
+                    </div>
+                  )}
                   
                   {/* Backtest Metrics */}
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
