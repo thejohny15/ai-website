@@ -356,7 +356,9 @@ export async function generatePortfolioPDF(
     doc.text("Historical Portfolio Snapshot", margin, startY);
     startY += 18;
 
-    const portfolioSeries = results.analytics?.backtest?.portfolioValues;
+    const portfolioSeries = results.analytics && results.analytics.backtest
+      ? results.analytics.backtest.portfolioValues
+      : undefined;
     if (portfolioSeries && portfolioSeries.length > 1) {
       const chartHeight = 140;
       const chartWidth = docWidth - margin * 2;

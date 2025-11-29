@@ -48,6 +48,7 @@ export type Portfolio = {
     annualizedVolatility: number;
     sharpeRatio: number;
     maxDrawdown: number;
+    maxDrawdownPeriod?: { start: string; end: string };
     rebalanceDates?: any[]; // Rebalancing events with all details
     dividendCash?: number;
     dividendCashIfReinvested?: number;

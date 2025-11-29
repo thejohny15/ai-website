@@ -13,6 +13,7 @@ import {
 import PortfolioPerformanceChart from "@/components/PortfolioPerformanceChart";
 import PortfolioPerformanceSinceCreation from "@/components/PortfolioPerformanceSinceCreation";
 import { generatePortfolioPDF } from "@/components/portfolio/PDFGenerator";
+import { calculateRiskContributions } from "@/lib/riskBudgeting";
 
 /** Local type for a user-owned position (persisted in Portfolio.currentHoldings). */
 type UserPosition = {
@@ -304,10 +305,48 @@ export default function PortfolioDetail() {
           todaysPrices: data.todaysPrices,
           mostRecentDate: data.mostRecentDate,
         });
-        if (data.currentRiskContributions) {
-          setCurrentRiskContributions(data.currentRiskContributions);
+        const hasPostCreationClose =
+          data.initialDate &&
+          data.mostRecentDate &&
+          new Date(data.mostRecentDate).getTime() > new Date(data.initialDate).getTime();
+
+        if (hasPostCreationClose) {
+          let rcFromMatrix: Record<string, number> | null = null;
+          if (
+            Array.isArray(data.driftedWeights) &&
+            Array.isArray(data.covarianceMatrix) &&
+            data.covarianceMatrix.length > 0
+          ) {
+            try {
+              const driftedWeights = data.driftedWeights.map((w: number) =>
+                typeof w === "number" ? w / 100 : 0
+              );
+              const { percentages } = calculateRiskContributions(
+                driftedWeights,
+                data.covarianceMatrix as number[][]
+              );
+              const rcMap: Record<string, number> = {};
+              symbols.forEach((symbol, idx) => {
+                const pct = Number.isFinite(percentages[idx])
+                  ? percentages[idx]
+                  : (driftedWeights[idx] ?? 0) * 100;
+                rcMap[symbol] = parseFloat(pct.toFixed(2));
+              });
+              rcFromMatrix = rcMap;
+            } catch (err) {
+              console.error("Failed to recalc drifted risk contributions:", err);
+            }
+          }
+
+          if (rcFromMatrix) {
+            setCurrentRiskContributions(rcFromMatrix);
+          } else if (data.currentRiskContributions) {
+            setCurrentRiskContributions(data.currentRiskContributions);
+          }
+        } else {
+          setCurrentRiskContributions({});
         }
-      } catch (error) {
+        } catch (error) {
         console.error('Error fetching since creation data:', error);
         setSinceCreationNotice('Unable to load performance since creation yet. Please try again soon.');
       } finally {
@@ -432,9 +471,10 @@ export default function PortfolioDetail() {
         try {
           const startDate = new Date(p.createdAt).toISOString().split("T")[0];
           const endDate = new Date().toISOString().split("T")[0];
+          const proposalHoldings = p.proposalHoldings ?? [];
           const symbols = Array.from(
             new Set([
-              ...p.proposalHoldings.map((holding) => holding.symbol),
+              ...proposalHoldings.map((holding) => holding.symbol),
               benchmarkSymbol,
             ])
           );
@@ -460,7 +500,7 @@ export default function PortfolioDetail() {
           if (dates.length === 0) return undefined;
           const rawValues = dates.map((date) => {
             let portfolioValue = 0;
-            p.proposalHoldings!.forEach((holding) => {
+            proposalHoldings.forEach((holding) => {
               const priceSeries = historicalPrices[holding.symbol] || [];
               const pricePoint = priceSeries.find((pt: any) => pt.date === date);
               if (pricePoint?.price) {
@@ -536,7 +576,7 @@ export default function PortfolioDetail() {
                 rebalanceCount: backtestResultsData.rebalanceDates?.length,
                 dividendCash: backtestResultsData.dividendCash,
                 dividendCashIfReinvested: backtestResultsData.dividendCashIfReinvested,
-                dates: backtestResultsData.dates,
+                dates: backtestResultsData.dates ?? [],
                 maxDrawdownPeriod: backtestResultsData.maxDrawdownPeriod,
               },
             }
@@ -1438,7 +1478,11 @@ export default function PortfolioDetail() {
                       
                       // Risk contribution approximated with live drifted weights so we show the
                       // exposure each sleeve currently contributes (matches the drift pie).
-                      const riskContribDisplay = currentWeight.toFixed(2);
+                      const rcValue =
+                        typeof currentRiskContributions[h.symbol] === "number"
+                          ? currentRiskContributions[h.symbol]
+                          : currentWeight;
+                      const riskContribDisplay = rcValue.toFixed(2);
                       
                       return (
                         <tr key={i} className="border-b border-slate-600/20 hover:bg-slate-700/30 transition">

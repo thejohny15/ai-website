@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runBacktest } from "@/lib/backtest";
+import {
+  calculateCovarianceMatrix,
+  calculateReturns,
+  calculateRiskContributions,
+  calculateCorrelationMatrix,
+  calculateAverageCorrelation,
+} from "@/lib/riskBudgeting";
 
 /**
  * REBALANCING DATA API
@@ -243,6 +250,73 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // STEP 6: Calculate drifted weights using latest prices
+    const basePortfolioValue = 10000;
+    const currentValues = symbols.map((symbol, idx) => {
+      const basePrice = initialPrices[symbol];
+      const latestPrice = todaysPrices[symbol];
+      const targetWeight = targetWeights[idx] ?? 0;
+      if (
+        typeof basePrice === "number" &&
+        basePrice > 0 &&
+        typeof latestPrice === "number" &&
+        latestPrice > 0
+      ) {
+        const shares = (basePortfolioValue * targetWeight) / basePrice;
+        return shares * latestPrice;
+      }
+      return basePortfolioValue * targetWeight;
+    });
+    const totalCurrentValue = currentValues.reduce((sum, val) => sum + val, 0);
+    const driftedWeights =
+      totalCurrentValue > 0
+        ? currentValues.map((val) => val / totalCurrentValue)
+        : [...targetWeights];
+
+    // Build covariance/correlation matrices over the requested lookback window
+    let driftedRiskContributions: Record<string, number> = {};
+    let covarianceMatrix: number[][] | undefined;
+    let correlationMatrix: number[][] | undefined;
+    let avgCorrelation: string | undefined;
+    const driftedWeightsPct = driftedWeights.map((w) =>
+      parseFloat(((w ?? 0) * 100).toFixed(4))
+    );
+
+    try {
+      const lookbackWindowDays = Math.max(1, normalizedLookbackYears * 252);
+      const covStartIdx = Math.max(0, commonDates.length - lookbackWindowDays);
+      const returnsData = symbols.map((symbol) => {
+        const series = pricesMap.get(symbol) || [];
+        const window = series.slice(covStartIdx);
+        if (window.length < 2) {
+          throw new Error(`Insufficient price history for ${symbol}`);
+        }
+        return calculateReturns(window);
+      });
+
+      covarianceMatrix = calculateCovarianceMatrix(returnsData);
+      correlationMatrix = calculateCorrelationMatrix(covarianceMatrix);
+      avgCorrelation = calculateAverageCorrelation(correlationMatrix);
+
+      const { percentages } = calculateRiskContributions(
+        driftedWeights,
+        covarianceMatrix
+      );
+      symbols.forEach((symbol, idx) => {
+        const pct = Number.isFinite(percentages[idx])
+          ? percentages[idx]
+          : (driftedWeights[idx] ?? 0) * 100;
+        driftedRiskContributions[symbol] = parseFloat(pct.toFixed(2));
+      });
+    } catch (err) {
+      console.warn("Unable to build covariance matrix for drifted RC:", err);
+      symbols.forEach((symbol, idx) => {
+        driftedRiskContributions[symbol] = parseFloat(
+          ((driftedWeights[idx] ?? targetWeights[idx] ?? 0) * 100).toFixed(2)
+        );
+      });
+    }
+
     return NextResponse.json({
       rebalancingData,
       portfolioValues: backtest.portfolioValues,
@@ -251,7 +325,11 @@ export async function POST(req: NextRequest) {
       initialDate,
       initialPrices,
       todaysPrices, // Today's closing prices for drift calculation
-      currentRiskContributions: backtest.currentRiskContributions || {},
+      currentRiskContributions: driftedRiskContributions,
+      covarianceMatrix,
+      correlationMatrix,
+      avgCorrelation,
+      driftedWeights: driftedWeightsPct,
     });
     
   } catch (error: any) {
