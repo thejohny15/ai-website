@@ -78,6 +78,8 @@ interface PortfolioResults {
     endDate?: string;
   };
   currentPerformanceSeries?: { date?: string; value: number }[];
+  performanceSinceCreationSeries?: { date?: string; portfolioValue: number; benchmarkValue?: number }[];
+  performanceSinceCreationBenchmark?: string;
 }
 
 const LOOKBACK_LABELS: Record<Lookback, string> = {
@@ -124,12 +126,33 @@ function drawValueLineChart(
     height: number;
     color: [number, number, number];
     dates?: string[];
+    secondaryValues?: number[];
+    secondaryColor?: [number, number, number];
+    secondaryDash?: number[];
   }
 ): number {
-  const { values, x, y, width, height, color, dates } = opts;
+  const {
+    values,
+    x,
+    y,
+    width,
+    height,
+    color,
+    dates,
+    secondaryValues,
+    secondaryColor = [148, 163, 184],
+    secondaryDash = [4, 3],
+  } = opts;
   if (!values.length) return y;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+
+  const minPrimary = Math.min(...values);
+  const maxPrimary = Math.max(...values);
+  let min = minPrimary;
+  let max = maxPrimary;
+  if (secondaryValues?.length) {
+    min = Math.min(min, ...secondaryValues);
+    max = Math.max(max, ...secondaryValues);
+  }
   const range = Math.max(max - min, 1);
   let minIndex = 0;
   let maxIndex = 0;
@@ -147,28 +170,67 @@ function drawValueLineChart(
     prevY = currY;
   }
 
+  if (secondaryValues && secondaryValues.length > 1) {
+    const denom = Math.max(secondaryValues.length - 1, 1);
+    doc.setLineWidth(1.25);
+    doc.setDrawColor(...secondaryColor);
+    doc.setLineDashPattern(secondaryDash, 0);
+    let prevSX = x;
+    let prevSY = y + height - ((secondaryValues[0] - min) / range) * height;
+    for (let i = 1; i < secondaryValues.length; i++) {
+      const currX = x + (i / denom) * width;
+      const currY = y + height - ((secondaryValues[i] - min) / range) * height;
+      doc.line(prevSX, prevSY, currX, currY);
+      prevSX = currX;
+      prevSY = currY;
+    }
+    doc.setLineDashPattern([], 0);
+  }
+
   // min/max labels positioned along the curve
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
   doc.setTextColor(71, 85, 105);
-  const minX = x + (minIndex / (values.length - 1)) * width;
+  const minX = x + (minIndex / (values.length - 1 || 1)) * width;
   const minY = y + height - ((values[minIndex] - min) / range) * height;
-  const maxX = x + (maxIndex / (values.length - 1)) * width;
+  const maxX = x + (maxIndex / (values.length - 1 || 1)) * width;
   const maxY = y + height - ((values[maxIndex] - min) / range) * height;
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(51, 65, 85);
-  doc.text(formatCurrency(values[minIndex]), minX + 4, minY + 12);
-  doc.text(formatCurrency(values[maxIndex]), maxX - 4, maxY - 8, { align: "right" });
+
+  const drawCurrencyLabel = (
+    label: string,
+    anchorX: number,
+    anchorY: number,
+    align: "left" | "right"
+  ) => {
+    const padding = 3;
+    const textWidth = doc.getTextWidth(label);
+    const rectWidth = textWidth + padding * 2;
+    const rectHeight = 14;
+    const rectX = align === "right" ? anchorX - rectWidth : anchorX;
+    const rectY = anchorY - rectHeight - 6;
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(rectX, rectY, rectWidth, rectHeight, 2, 2, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(15, 23, 42);
+    const textX = align === "right" ? anchorX - padding : rectX + padding;
+    doc.text(label, textX, rectY + rectHeight - 4, {
+      align: align === "right" ? "right" : "left",
+    });
+  };
+
+  drawCurrencyLabel(formatCurrency(values[minIndex]), minX + 4, minY, "left");
+  drawCurrencyLabel(formatCurrency(values[maxIndex]), maxX - 4, maxY, "right");
 
   // timeline labels
   if (dates && dates.length > 0) {
     const firstDate = dates[0];
     const lastDate = dates[dates.length - 1];
+    const timelineY = y + height + 10;
     doc.setFont("helvetica", "normal");
     doc.setTextColor(71, 85, 105);
-    doc.text(firstDate || "Start", x, y + height + 16);
+    doc.text(firstDate || "Start", x, timelineY);
     const lastWidth = doc.getTextWidth(lastDate || "Today");
-    doc.text(lastDate || "Today", x + width - lastWidth, y + height + 16);
+    doc.text(lastDate || "Today", x + width - lastWidth, timelineY);
   }
 
   return y + height;
@@ -235,33 +297,6 @@ export async function generatePortfolioPDF(
   }
 
   let startY = summaryTop + summaryHeight + 25;
-
-  // Portfolio metrics table
-  const metricsRows: (string | number)[][] = [
-    ["Expected Return", formatPercent(results.metrics?.expectedReturn)],
-    ["Portfolio Volatility", formatPercent(results.metrics?.portfolioVolatility)],
-    ["Sharpe Ratio", formatNumber(results.metrics?.sharpeRatio)],
-    ["Max Drawdown", formatPercent(results.metrics?.maxDrawdown)],
-  ];
-
-  autoTable(doc, {
-    startY,
-    margin: { left: margin, right: margin },
-    head: [["Historic Portfolio Metric", "Value"]],
-    body: metricsRows,
-    styles: { fontSize: 11, cellPadding: 6, textColor: [15, 23, 42] },
-    headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontStyle: "bold" },
-    alternateRowStyles: { fillColor: [247, 249, 252] },
-    theme: "grid",
-  });
-
-  startY = (doc as any).lastAutoTable.finalY + 24;
-
-  // Check if new page needed
-  if (startY > pageHeight - 150) {
-    doc.addPage();
-    startY = margin;
-  }
 
   // Backtest metrics
   if (results.analytics?.backtest) {
@@ -366,6 +401,89 @@ export async function generatePortfolioPDF(
         startY + 56
       );
       startY += blockHeight + 24;
+    }
+
+    if (results.performanceSinceCreationSeries?.length) {
+      if (startY > pageHeight - 260) {
+        doc.addPage();
+        startY = margin;
+      }
+      const creationValues = results.performanceSinceCreationSeries.map((p) => p.portfolioValue);
+      const creationDates = results.performanceSinceCreationSeries.map((p) => p.date ?? "");
+      const hasBenchmark = results.performanceSinceCreationSeries.some(
+        (p) => typeof p.benchmarkValue === "number"
+      );
+      const benchmarkValues = hasBenchmark
+        ? results.performanceSinceCreationSeries.map((p) => p.benchmarkValue ?? 0)
+        : undefined;
+      const benchmarkLabel =
+        results.performanceSinceCreationBenchmark || "Benchmark";
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(12);
+      doc.setTextColor(88, 28, 135);
+      doc.text("Performance Since Portfolio Creation", margin, startY);
+      startY += 12;
+
+      const chartHeight = 180;
+      startY =
+        drawValueLineChart(doc, {
+          values: creationValues,
+          secondaryValues: benchmarkValues,
+          x: margin,
+          y: startY,
+          width: docWidth - margin * 2,
+          height: chartHeight,
+          color: [139, 92, 246],
+          dates: creationDates,
+        }) + 18;
+
+      const legendY = startY + 8;
+      doc.setLineWidth(2);
+      doc.setDrawColor(139, 92, 246);
+      doc.line(margin, legendY, margin + 18, legendY);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105);
+      doc.text("Portfolio", margin + 24, legendY + 3);
+
+      const portfolioReturn =
+        creationValues.length > 1 && creationValues[0] !== 0
+          ? ((creationValues[creationValues.length - 1] - creationValues[0]) / creationValues[0]) * 100
+          : 0;
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(15, 23, 42);
+      doc.text(
+        `${portfolioReturn >= 0 ? "+" : ""}${portfolioReturn.toFixed(2)}%`,
+        margin + 60,
+        legendY + 3
+      );
+
+      if (hasBenchmark && benchmarkValues) {
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(71, 85, 105);
+        doc.setDrawColor(148, 163, 184);
+        doc.setLineDashPattern([4, 3], 0);
+        doc.line(margin + 140, legendY, margin + 158, legendY);
+        doc.setLineDashPattern([], 0);
+        const benchmarkLabelText = `Benchmark (${benchmarkLabel})`;
+        doc.text(benchmarkLabelText, margin + 164, legendY + 3);
+
+        const benchmarkReturn =
+          benchmarkValues.length > 1 && benchmarkValues[0] !== 0
+            ? ((benchmarkValues[benchmarkValues.length - 1] - benchmarkValues[0]) / benchmarkValues[0]) * 100
+            : 0;
+        const labelWidth = doc.getTextWidth(benchmarkLabelText);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(107, 114, 128);
+        doc.text(
+          `${benchmarkReturn >= 0 ? "+" : ""}${benchmarkReturn.toFixed(2)}%`,
+          margin + 164 + labelWidth + 16,
+          legendY + 5
+        );
+      }
+
+      startY = legendY + 26;
     }
 
     if (results.currentPerformanceSeries?.length) {

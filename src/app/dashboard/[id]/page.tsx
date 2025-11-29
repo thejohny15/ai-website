@@ -427,6 +427,79 @@ export default function PortfolioDetail() {
     if (!p || !(p.proposalHoldings?.length)) return;
     try {
       setDownloadingPDF(true);
+      const benchmarkSymbol = "SPY";
+      const fetchPerformanceSinceCreationSeries = async () => {
+        try {
+          const startDate = new Date(p.createdAt).toISOString().split("T")[0];
+          const endDate = new Date().toISOString().split("T")[0];
+          const symbols = Array.from(
+            new Set([
+              ...p.proposalHoldings.map((holding) => holding.symbol),
+              benchmarkSymbol,
+            ])
+          );
+          const response = await fetch("/api/historical-quotes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              symbols,
+              startDate,
+              endDate,
+            }),
+          });
+          if (!response.ok) throw new Error("Unable to fetch historical quotes");
+          const data = await response.json();
+          const historicalPrices = data.historicalPrices || {};
+          const allDates = new Set<string>();
+          Object.values(historicalPrices).forEach((series: any) => {
+            (series as any[]).forEach((point) => {
+              if (point?.date) allDates.add(point.date);
+            });
+          });
+          const dates = Array.from(allDates).sort();
+          if (dates.length === 0) return undefined;
+          const rawValues = dates.map((date) => {
+            let portfolioValue = 0;
+            p.proposalHoldings!.forEach((holding) => {
+              const priceSeries = historicalPrices[holding.symbol] || [];
+              const pricePoint = priceSeries.find((pt: any) => pt.date === date);
+              if (pricePoint?.price) {
+                portfolioValue += pricePoint.price * (holding.weight / 100);
+              }
+            });
+            return portfolioValue;
+          });
+          const firstValue = rawValues.find((v) => v > 0) || 1;
+          const normalizedValues = rawValues.map(
+            (value) => (value / firstValue) * 10000
+          );
+          const benchmarkSeries = (() => {
+            const priceSeries = historicalPrices[benchmarkSymbol];
+            if (!priceSeries || !priceSeries.length) return undefined;
+            const priceMap = new Map(
+              priceSeries.map((pt: any) => [pt.date, pt.price])
+            );
+            let lastPrice = priceSeries[0].price || 1;
+            const startPrice = priceSeries[0].price || 1;
+            return dates.map((date) => {
+              if (priceMap.has(date)) {
+                lastPrice = priceMap.get(date)!;
+              }
+              return (lastPrice / startPrice) * 10000;
+            });
+          })();
+          return dates.map((date, idx) => ({
+            date,
+            portfolioValue: normalizedValues[idx],
+            benchmarkValue: benchmarkSeries ? benchmarkSeries[idx] : undefined,
+          }));
+        } catch (error) {
+          console.error("Failed to build performance series for PDF:", error);
+          return undefined;
+        }
+      };
+      const performanceSinceCreationSeries =
+        await fetchPerformanceSinceCreationSeries();
       const weights = (p.proposalHoldings ?? []).map((holding) => {
         const nameFromNote = holding.note?.split(" • ")[0];
         return {
@@ -500,6 +573,8 @@ export default function PortfolioDetail() {
       }
       return series.length > 1 ? series : undefined;
     })(),
+    performanceSinceCreationSeries,
+    performanceSinceCreationBenchmark: performanceSinceCreationSeries ? benchmarkSymbol : undefined,
     includeDividends: Boolean(backtestResultsData?.dividendCashIfReinvested),
   };
 
@@ -1187,13 +1262,21 @@ export default function PortfolioDetail() {
         || sinceCreationMeta.initialPrices
         || {};
       
+      const basePortfolioValue = (() => {
+        if (lastRebalanceData?.portfolioValue) {
+          const parsed = parseFloat(lastRebalanceData.portfolioValue);
+          if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+        }
+        return 10000;
+      })();
+
       // Calculate ACCURATE current weights using real historical prices
       const currentWeights = targetWeights.map((tw: any) => {
         const currentPrice = getClosingPrice(tw.symbol);
         const rebalancePrice = basePrices[tw.symbol] || currentPrice || 0;
         
         // Calculate shares bought at last rebalance
-        const initialValue = 10000 * (tw.weight / 100);
+        const initialValue = basePortfolioValue * (tw.weight / 100);
         const shares = rebalancePrice > 0 ? initialValue / rebalancePrice : 0;
         
         // Value those shares at TODAY's price
@@ -1313,13 +1396,21 @@ export default function PortfolioDetail() {
                     // Get risk contributions from last rebalance
                     const lastRebalanceRiskContrib: Record<string, number> = lastRebalanceData?.riskContributions || {};
                     
+                    const basePortfolioValue = (() => {
+                      if (lastRebalanceData?.portfolioValue) {
+                        const parsed = parseFloat(lastRebalanceData.portfolioValue);
+                        if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+                      }
+                      return 10000;
+                    })();
+
                     // Calculate current metrics for each holding
                     const holdings = targetAllocations.map((allocation: any) => {
                       const currentPrice = getClosingPrice(allocation.symbol);
                       const rebalancePrice = pricesAtRebalance[allocation.symbol] || currentPrice;
                       
                       // Calculate shares and current value
-                      const initialValue = 10000 * (allocation.weight / 100);
+                      const initialValue = basePortfolioValue * (allocation.weight / 100);
                       const shares = rebalancePrice > 0 ? initialValue / rebalancePrice : 0;
                       const currentValue = shares * currentPrice;
                       
@@ -1345,12 +1436,9 @@ export default function PortfolioDetail() {
                       const todaysTargetWeight = todaysTargetMap[h.symbol] ?? h.targetWeight ?? 0;
                       const drift = currentWeight - todaysTargetWeight;
                       
-                      // UPDATED LOGIC HERE: Use the Drifted Risk Contribution from state if available
-                      // If available, this comes from the backend calculation (Euler decomp).
-                      // If not (legacy portfolio), fallback to current weight approximation.
-                      const riskContribDisplay = currentRiskContributions[h.symbol] !== undefined
-                        ? currentRiskContributions[h.symbol].toFixed(2)
-                        : currentWeight.toFixed(2);
+                      // Risk contribution approximated with live drifted weights so we show the
+                      // exposure each sleeve currently contributes (matches the drift pie).
+                      const riskContribDisplay = currentWeight.toFixed(2);
                       
                       return (
                         <tr key={i} className="border-b border-slate-600/20 hover:bg-slate-700/30 transition">
