@@ -139,16 +139,49 @@ export default function PortfolioDetail() {
       // Map saved rebalancing events to display format
       const mappedData = p.backtestResults.rebalanceDates.map((rebalance: any, idx: number) => {
         console.log(`Rebalance #${idx + 1}:`, rebalance);
-        
+
+        // Fallback calculations if totals were not persisted in older saves
+        const portfolioValNum = typeof rebalance.portfolioValue === "number"
+          ? rebalance.portfolioValue
+          : parseFloat(rebalance.portfolioValue || "0");
+        const changesArr: any[] = rebalance.changes || [];
+        const fallbackTradingVolume =
+          rebalance.totalTradingVolume !== undefined
+            ? rebalance.totalTradingVolume
+            : changesArr.reduce((sum, ch) => {
+                if (typeof ch.tradeAmount === "number") return sum + Math.abs(ch.tradeAmount);
+                if (
+                  portfolioValNum > 0 &&
+                  typeof ch.beforeWeight === "number" &&
+                  typeof ch.afterWeight === "number"
+                ) {
+                  return sum + Math.abs(((ch.afterWeight - ch.beforeWeight) / 100) * portfolioValNum);
+                }
+                return sum;
+              }, 0);
+        const fallbackTransactionCost =
+          rebalance.transactionCost !== undefined
+            ? rebalance.transactionCost
+            : fallbackTradingVolume * 0.001; // default 0.1%
+        const fallbackRebalancePct =
+          rebalance.totalRebalancePct !== undefined
+            ? rebalance.totalRebalancePct
+            : portfolioValNum > 0
+              ? (fallbackTradingVolume / portfolioValNum) * 100
+              : 0;
+
         return {
           date: rebalance.date,
-          portfolioValue: rebalance.portfolioValue.toFixed(2),
-          weightChanges: rebalance.changes || [],
+          portfolioValue: portfolioValNum.toFixed(2),
+          weightChanges: changesArr,
           qtrReturn: rebalance.quarterlyReturn?.toFixed(2) || "0.00",
           vol: rebalance.volatility?.toFixed(2) || "0.00",
           sharpe: rebalance.sharpe?.toFixed(2) || "0.00",
+          totalTradingVolume: fallbackTradingVolume.toFixed(2),
+          transactionCost: fallbackTransactionCost.toFixed(2),
+          totalRebalancePct: fallbackRebalancePct.toFixed(2),
           pricesAtRebalance: rebalance.pricesAtRebalance || {},
-          riskContributions: rebalance.riskContributions || (rebalance.changes || []).reduce((acc: Record<string, number>, change: any) => {
+          riskContributions: rebalance.riskContributions || changesArr.reduce((acc: Record<string, number>, change: any) => {
             const ticker = change.symbol || change.ticker;
             if (ticker) {
               acc[ticker] = parseFloat(change.afterWeight);
@@ -957,61 +990,122 @@ export default function PortfolioDetail() {
                     Portfolio was rebalanced {historicalRebalancingData.length} times (quarterly) to maintain risk balance. 
                     Each rebalance incurred 0.1% transaction costs.
                   </p>
-                  <div className="max-h-96 overflow-y-auto space-y-2">
-                    {historicalRebalancingData.map((rebalance, idx) => (
-                      <div key={idx} className="rounded-lg bg-slate-700/30 border border-slate-500/30 p-3">
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="text-sm font-semibold text-white">
-                            Rebalance #{idx + 1} - {new Date(rebalance.date).toLocaleDateString('en-US', { 
-                              year: 'numeric', 
-                              month: 'short', 
-                              day: '2-digit' 
-                            })}
-                          </span>
-                          <span className="text-xs text-slate-400">
-                            Portfolio: ${rebalance.portfolioValue}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-3 gap-4">
-                          {/* Column 1 & 2: Weight Changes */}
-                          <div className="col-span-2 grid grid-cols-2 gap-x-4 gap-y-1">
-                            {rebalance.weightChanges.slice(0, 4).map((change: any, hIdx: number) => (
-                              <div key={hIdx} className="flex items-center gap-1.5 text-xs">
-                                <span className="text-slate-300 font-medium min-w-[45px]">{change.ticker || change.symbol}:</span>
-                                <span className="text-slate-100">
-                                  {change.beforeWeight}% → {change.afterWeight}%
-                                </span>
-                                <span className={`text-xs font-bold ${
-                                  parseFloat(change.drift) > 0 ? 'text-emerald-400' : 'text-red-400'
-                                }`}>
-                                  ({parseFloat(change.drift) > 0 ? '+' : ''}{change.drift}%)
-                                </span>
+                  <div className="max-h-96 overflow-y-auto space-y-3">
+                    {historicalRebalancingData.map((rebalance, idx) => {
+                      const formattedDate = new Date(rebalance.date).toLocaleDateString('en-US', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: '2-digit'
+                      });
+                      const weightChanges = rebalance.weightChanges || [];
+                      const totalRebalanceMagnitude = weightChanges.reduce((sum: number, change: any) => {
+                        const before = parseFloat(change.beforeWeight);
+                        const after = parseFloat(change.afterWeight);
+                        if (Number.isFinite(before) && Number.isFinite(after)) {
+                          return sum + Math.abs(after - before);
+                        }
+                        return sum;
+                      }, 0);
+                      const portfolioValue = parseFloat(String(rebalance.portfolioValue).replace(/,/g, '')) || 0;
+                      const fallbackTradingVolume = portfolioValue > 0 ? (totalRebalanceMagnitude / 2 / 100) * portfolioValue : 0;
+                      const tradingVolumeDollars = parseFloat(rebalance.totalTradingVolume ?? rebalance.tradingVolume ?? fallbackTradingVolume).toFixed(2);
+                      const transactionCostDollars = parseFloat(rebalance.transactionCost ?? rebalance.transactionCosts ?? (Number(tradingVolumeDollars) * 0.001)).toFixed(2);
+                      const qtrReturnValueRaw = parseFloat(rebalance.qtrReturn ?? rebalance.quarterlyReturn ?? 0);
+                      const qtrReturnValue = Number.isFinite(qtrReturnValueRaw) ? qtrReturnValueRaw : 0;
+                      const volDisplay = (rebalance.vol ?? rebalance.volatility ?? 0).toString();
+                      const sharpeDisplay = (rebalance.sharpe ?? rebalance.sharpeRatio ?? 0).toString();
+                      const totalRebalanceRaw = parseFloat(
+                        rebalance.totalRebalancePct ?? rebalance.totalRebalanceMagnitude ?? rebalance.totalRebalancing ?? totalRebalanceMagnitude
+                      );
+                      const totalRebalanceDisplay = Number.isFinite(totalRebalanceRaw)
+                        ? totalRebalanceRaw.toFixed(2)
+                        : totalRebalanceMagnitude.toFixed(2);
+
+                      return (
+                        <div
+                          key={idx}
+                          className="rounded-2xl border border-white/10 bg-gradient-to-r from-slate-800/80 via-slate-800/60 to-slate-900/70 p-4 shadow-lg"
+                        >
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="text-sm font-semibold text-white">
+                              Rebalance #{idx + 1} - {formattedDate}
+                            </span>
+                            <span className="text-xs text-slate-200 font-medium">
+                              Portfolio: ${portfolioValue.toFixed(2)}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-5 gap-3">
+                            <div className="col-span-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                              {weightChanges.map((change: any, hIdx: number) => {
+                                const before = parseFloat(change.beforeWeight);
+                                const after = parseFloat(change.afterWeight);
+                                const allocationChange = Number.isFinite(after) && Number.isFinite(before) ? after - before : 0;
+                                return (
+                                  <div key={hIdx} className="flex items-center gap-2 text-xs leading-tight">
+                                    <span className="text-slate-200 font-semibold min-w-[42px]">
+                                      {change.ticker || change.symbol}:
+                                    </span>
+                                    <span className="text-slate-100">
+                                      {change.beforeWeight}% → {change.afterWeight}%
+                                    </span>
+                                    <span
+                                      className={`font-semibold ${
+                                        allocationChange > 0
+                                          ? 'text-emerald-400'
+                                          : allocationChange < 0
+                                            ? 'text-red-400'
+                                            : 'text-slate-400'
+                                      }`}
+                                    >
+                                      ({allocationChange > 0 ? '+' : ''}{allocationChange.toFixed(2)}%)
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            <div className="col-span-2 border-l border-white/10 pl-4 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-100 leading-tight">
+                              <div className="space-y-1">
+                                <div>
+                                  <span className="text-slate-300">Vol: </span>
+                                  <span className="font-semibold text-white">{volDisplay}%</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-300">Sharpe: </span>
+                                  <span className="font-semibold text-white">{sharpeDisplay}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-300">Total Rebalancing: </span>
+                                  <span className="font-semibold text-white">{totalRebalanceDisplay}%</span>
+                                </div>
                               </div>
-                            ))}
-                          </div>
-                          
-                          {/* Column 3: Portfolio Metrics */}
-                          <div className="border-l border-slate-600/30 pl-4 space-y-1">
-                            <div className="text-xs">
-                              <span className="text-slate-400">Qtr Return:</span>{' '}
-                              <span className={`font-semibold ${
-                                parseFloat(rebalance.qtrReturn) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                              }`}>
-                                {parseFloat(rebalance.qtrReturn) > 0 ? '+' : ''}{rebalance.qtrReturn}%
-                              </span>
-                            </div>
-                            <div className="text-xs">
-                              <span className="text-slate-400">Vol:</span>{' '}
-                              <span className="text-slate-100 font-semibold">{rebalance.vol}%</span>
-                            </div>
-                            <div className="text-xs">
-                              <span className="text-slate-400">Sharpe:</span>{' '}
-                              <span className="text-slate-100 font-semibold">{rebalance.sharpe}</span>
+                              <div className="space-y-1">
+                                <div>
+                                  <span className="text-slate-300">Qtr Return: </span>
+                                  <span
+                                    className={`font-semibold ${
+                                      qtrReturnValue >= 0 ? 'text-emerald-400' : 'text-red-400'
+                                    }`}
+                                  >
+                                    {qtrReturnValue > 0 ? '+' : ''}
+                                    {qtrReturnValue.toFixed(2)}%
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-300">Trading Volume: </span>
+                                  <span className="font-semibold text-white">${tradingVolumeDollars}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-300">Transaction Costs: </span>
+                                  <span className="font-semibold text-white">${transactionCostDollars}</span>
+                                </div>
+                              </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

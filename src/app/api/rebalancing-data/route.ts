@@ -196,6 +196,9 @@ export async function POST(req: NextRequest) {
       qtrReturn: rebalance.quarterlyReturn?.toFixed(2) || "0.00",
       vol: rebalance.volatility?.toFixed(2) || "0.00",
       sharpe: rebalance.sharpe?.toFixed(2) || "0.00",
+      totalTradingVolume: rebalance.totalTradingVolume !== undefined ? rebalance.totalTradingVolume.toFixed(2) : "0.00",
+      transactionCost: rebalance.transactionCost !== undefined ? rebalance.transactionCost.toFixed(2) : "0.00",
+      totalRebalancePct: rebalance.totalRebalancePct !== undefined ? rebalance.totalRebalancePct.toFixed(2) : "0.00",
       // Store prices at this rebalance date for drift calculation
       pricesAtRebalance: symbols.reduce((acc: Record<string, number>, symbol: string) => {
         const prices = pricesMap.get(symbol);

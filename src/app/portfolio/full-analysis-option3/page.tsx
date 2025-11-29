@@ -59,6 +59,8 @@ function RiskBudgetingPageContent() {
       }))
     : [];
 
+  const displayWeights = normalizedWeights;
+
   function toggleAsset(id: string) {
     setAssetClasses(prev =>
       prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a)

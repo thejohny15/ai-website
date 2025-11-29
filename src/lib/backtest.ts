@@ -28,6 +28,7 @@ export interface RebalanceEvent {
   }[];
   totalTradingVolume?: number;
   transactionCost?: number;
+  totalRebalancePct?: number;
   pricesAtRebalance?: Record<string, number>;
   riskContributions?: Record<string, number>;
 }
@@ -331,6 +332,7 @@ export function runBacktest(
         quarterlyReturn: parseFloat(quarterlyReturn.toFixed(2)),
         totalTradingVolume: parseFloat(totalTradingVolume.toFixed(2)),
         transactionCost: parseFloat(transactionCost.toFixed(2)),
+        totalRebalancePct: portfolioValue > 0 ? parseFloat(((totalTradingVolume / portfolioValue) * 100).toFixed(2)) : 0,
         changes: tickers.map((tick,i)=>{
           const price = pricesMap.get(tick)![t];
           const curVal = shares[i]*price;
@@ -442,6 +444,9 @@ export function runBacktest(
         transactionCost: ev.transactionCost !== undefined
           ? parseFloat((ev.transactionCost*scale).toFixed(2))
           : ev.transactionCost,
+        totalRebalancePct: ev.totalRebalancePct !== undefined
+          ? parseFloat(ev.totalRebalancePct.toFixed(2))
+          : ev.totalRebalancePct,
         changes: ev.changes.map(ch=>({
           ...ch,
           tradeAmount: ch.tradeAmount!==undefined
