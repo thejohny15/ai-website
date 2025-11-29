@@ -75,7 +75,35 @@ function readAll(userId: string): Portfolio[] {
 }
 
 function writeAll(userId: string, items: Portfolio[]) {
-  localStorage.setItem(KEY(userId), JSON.stringify(items));
+  const key = KEY(userId);
+  const tryWrite = (payload: Portfolio[]) => {
+    localStorage.setItem(key, JSON.stringify(payload));
+  };
+
+  try {
+    tryWrite(items);
+    return;
+  } catch (err: any) {
+    // Best-effort quota handling: progressively drop oldest portfolios until it fits.
+    const isQuota = err?.name === "QuotaExceededError" || err?.code === 22;
+    if (!isQuota) throw err;
+
+    const pruned = [...items];
+    while (pruned.length > 0) {
+      pruned.pop(); // drop oldest (stored at end)
+      try {
+        tryWrite(pruned);
+        console.warn("localStorage quota reached; pruned oldest portfolio to save space");
+        return;
+      } catch (innerErr: any) {
+        const stillQuota = innerErr?.name === "QuotaExceededError" || innerErr?.code === 22;
+        if (!stillQuota) throw innerErr;
+      }
+    }
+
+    // If nothing fits, surface a clear error
+    throw new Error("Unable to save portfolio: browser storage quota exceeded");
+  }
 }
 
 // --- Public API you can import in pages ---

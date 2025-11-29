@@ -127,11 +127,15 @@ function RiskBudgetingPageContent() {
       console.log('Has backtest?', results.analytics?.backtest);
 
       // Convert results to holdings format compatible with portfolio store
-      const holdings = results.weights.map((w: any) => ({
-        symbol: w.ticker,
-        weight: parseFloat(w.weight),
-        note: `${w.name} • Risk Contribution: ${w.riskContribution}%`,
-      }));
+      const holdings = results.weights.map((w: any) => {
+        const weightValue =
+          typeof w.weightRaw === "number" ? w.weightRaw : parseFloat(w.weight);
+        return {
+          symbol: w.ticker,
+          weight: weightValue,
+          note: `${w.name} • Risk Contribution: ${w.riskContribution}%`,
+        };
+      });
 
       // Create a summary object with risk budgeting details
       const summary = {
@@ -644,7 +648,7 @@ function RiskBudgetingPageContent() {
                   <div className="flex-1">
                     <p className="text-sm text-emerald-200">
                       <strong>Equal Risk Contribution achieved:</strong>{" "}
-                      Each asset contributes equally ({(100 / results.weights.length).toFixed(2)}% ± 0.5%) to total portfolio risk, maximizing diversification while respecting each asset&apos;s risk characteristics.
+                      Each asset contributes equally ({(100 / results.weights.length).toFixed(2)}%) to total portfolio risk, maximizing diversification while respecting each asset&apos;s risk characteristics.
                     </p>
                   </div>
                 </div>

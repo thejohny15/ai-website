@@ -278,6 +278,8 @@ export async function POST(req: NextRequest) {
     let covarianceMatrix: number[][] | undefined;
     let correlationMatrix: number[][] | undefined;
     let avgCorrelation: string | undefined;
+    // Preserve high precision drifted weights (decimals) and a rounded % view
+    const driftedWeightsRaw = driftedWeights.map((w) => Number(w ?? 0));
     const driftedWeightsPct = driftedWeights.map((w) =>
       parseFloat(((w ?? 0) * 100).toFixed(4))
     );
@@ -298,14 +300,17 @@ export async function POST(req: NextRequest) {
       correlationMatrix = calculateCorrelationMatrix(covarianceMatrix);
       avgCorrelation = calculateAverageCorrelation(correlationMatrix);
 
-      const { percentages } = calculateRiskContributions(
+      const { contributions } = calculateRiskContributions(
         driftedWeights,
         covarianceMatrix
       );
+      const total = contributions.reduce((sum, rc) => sum + (rc || 0), 0);
       symbols.forEach((symbol, idx) => {
-        const pct = Number.isFinite(percentages[idx])
-          ? percentages[idx]
-          : (driftedWeights[idx] ?? 0) * 100;
+        const contrib = contributions[idx];
+        const pct =
+          total !== 0 && Number.isFinite(contrib)
+            ? (contrib / total) * 100
+            : (driftedWeights[idx] ?? 0) * 100;
         driftedRiskContributions[symbol] = parseFloat(pct.toFixed(2));
       });
     } catch (err) {
@@ -330,6 +335,7 @@ export async function POST(req: NextRequest) {
       correlationMatrix,
       avgCorrelation,
       driftedWeights: driftedWeightsPct,
+      driftedWeightsRaw,
     });
     
   } catch (error: any) {

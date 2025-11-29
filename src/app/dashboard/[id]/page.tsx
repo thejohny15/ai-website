@@ -252,7 +252,14 @@ export default function PortfolioDetail() {
         const weights = p!.proposalHoldings!.map(h => h.weight);
         const lookbackYears = (() => {
           const lb = p!.proposalSummary?.lookbackPeriod;
-          if (typeof lb === 'string') {
+          if (typeof lb === "string") {
+            const lower = lb.toLowerCase();
+            if (lower.includes("3m")) return 0.25; // 3 months ≈ 1/4 year
+            if (lower.includes("1y")) return 1;
+            if (lower.includes("3y")) return 3;
+            if (lower.includes("5y")) return 5;
+            const numeric = parseFloat(lb);
+            if (!Number.isNaN(numeric) && numeric > 0) return numeric;
             const match = lb.match(/(\d+)/);
             if (match) return parseInt(match[1], 10);
           }
@@ -312,27 +319,34 @@ export default function PortfolioDetail() {
 
         if (hasPostCreationClose) {
           let rcFromMatrix: Record<string, number> | null = null;
+          const driftedWeightsInput = Array.isArray(data.driftedWeightsRaw)
+            ? data.driftedWeightsRaw
+            : Array.isArray(data.driftedWeights)
+              ? (data.driftedWeights as number[]).map((w: number) => w / 100)
+              : null;
+
           if (
-            Array.isArray(data.driftedWeights) &&
+            driftedWeightsInput &&
             Array.isArray(data.covarianceMatrix) &&
             data.covarianceMatrix.length > 0
           ) {
             try {
-              const driftedWeights = data.driftedWeights.map((w: number) =>
-                typeof w === "number" ? w / 100 : 0
-              );
-              const { percentages } = calculateRiskContributions(
-                driftedWeights,
+              const { contributions } = calculateRiskContributions(
+                driftedWeightsInput,
                 data.covarianceMatrix as number[][]
               );
-              const rcMap: Record<string, number> = {};
-              symbols.forEach((symbol, idx) => {
-                const pct = Number.isFinite(percentages[idx])
-                  ? percentages[idx]
-                  : (driftedWeights[idx] ?? 0) * 100;
-                rcMap[symbol] = parseFloat(pct.toFixed(2));
-              });
-              rcFromMatrix = rcMap;
+              const total = contributions.reduce((sum, rc) => sum + (rc || 0), 0);
+              if (total !== 0) {
+                const rcMap: Record<string, number> = {};
+                symbols.forEach((symbol, idx) => {
+                  const contrib = contributions[idx];
+                  const pct = Number.isFinite(contrib)
+                    ? (contrib / total) * 100
+                    : (driftedWeightsInput[idx] ?? 0) * 100;
+                  rcMap[symbol] = parseFloat(pct.toFixed(2));
+                });
+                rcFromMatrix = rcMap;
+              }
             } catch (err) {
               console.error("Failed to recalc drifted risk contributions:", err);
             }
@@ -344,7 +358,21 @@ export default function PortfolioDetail() {
             setCurrentRiskContributions(data.currentRiskContributions);
           }
         } else {
-          setCurrentRiskContributions({});
+          // First-day safeguard: use the optimizer's saved RC so it stays at exact ERC until the first close.
+          const rcFromSummary: Record<string, number> = {};
+          (p?.proposalHoldings ?? []).forEach((h: any) => {
+            const noteMatch = h.note?.match(/Risk Contribution:\s*([\d.]+)/);
+            if (noteMatch) {
+              rcFromSummary[h.symbol] = parseFloat(noteMatch[1]);
+            } else if (typeof h.weight === "number") {
+              rcFromSummary[h.symbol] = parseFloat(h.weight.toFixed(2));
+            }
+          });
+          if (Object.keys(rcFromSummary).length > 0) {
+            setCurrentRiskContributions(rcFromSummary);
+          } else {
+            setCurrentRiskContributions({});
+          }
         }
         } catch (error) {
         console.error('Error fetching since creation data:', error);
@@ -1515,9 +1543,7 @@ export default function PortfolioDetail() {
             </div>
             <div className="mt-4 p-3 rounded-lg border border-purple-500/30 bg-purple-500/10">
               <p className="text-xs text-purple-200">
-                <strong>Risk Contribution:</strong> This value calculates the percentage of total portfolio risk contributed by each asset. 
-                It uses the current (drifted) weights and the rolling {p.proposalSummary?.lookbackPeriod || '5y'} covariance matrix. 
-                When RC equals Target Weight, the portfolio is perfectly balanced (ERC). Deviations indicate the need to rebalance.
+                <strong>Risk Contribution:</strong> Computed nightly from the latest close using drifted weights and the {p.proposalSummary?.lookbackPeriod || '5y'} covariance matrix. In ERC portfolios this should sit at the equal-risk target; any movement reflects real market drift.
               </p>
             </div>
           </div>

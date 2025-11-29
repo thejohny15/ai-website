@@ -339,13 +339,19 @@ export async function POST(req: NextRequest) {
     const weights = assetClasses.map((asset: AssetClass, i: number) => ({
       name: asset.name,
       ticker: asset.ticker,
+      // Provide both display and raw weights to avoid precision loss downstream
       weight: (finalWeights[i] * 100).toFixed(2),
+      weightRaw: finalWeights[i] * 100,
       riskContribution: optimizer === "es"
         ? (((optimization as any).riskContributionShares?.[i] ?? 0) * 100).toFixed(2)
         : (optimization as any).riskContributions[i].toFixed(2),
+      riskContributionRaw: optimizer === "es"
+        ? (((optimization as any).riskContributionShares?.[i] ?? 0) * 100)
+        : (optimization as any).riskContributions[i],
       currentWeight: (currentWeights[i] * 100).toFixed(2),
       // Drifted Current RC
       currentRiskContribution: currentRiskContributions[i].toFixed(2),
+      currentRiskContributionRaw: currentRiskContributions[i],
     }));
     
     const metrics = {

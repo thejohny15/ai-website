@@ -207,7 +207,7 @@ function drawValueLineChart(
     const rectWidth = textWidth + padding * 2;
     const rectHeight = 14;
     const rectX = align === "right" ? anchorX - rectWidth : anchorX;
-    const rectY = anchorY - rectHeight - 6;
+    const rectY = anchorY + 6;
     doc.setFillColor(255, 255, 255);
     doc.roundedRect(rectX, rectY, rectWidth, rectHeight, 2, 2, "F");
     doc.setFont("helvetica", "bold");
@@ -225,7 +225,7 @@ function drawValueLineChart(
   if (dates && dates.length > 0) {
     const firstDate = dates[0];
     const lastDate = dates[dates.length - 1];
-    const timelineY = y + height + 10;
+    const timelineY = y + height + 26;
     doc.setFont("helvetica", "normal");
     doc.setTextColor(71, 85, 105);
     doc.text(firstDate || "Start", x, timelineY);
@@ -356,9 +356,7 @@ export async function generatePortfolioPDF(
     doc.text("Historical Portfolio Snapshot", margin, startY);
     startY += 18;
 
-    const portfolioSeries = results.analytics && results.analytics.backtest
-      ? results.analytics.backtest.portfolioValues
-      : undefined;
+    const portfolioSeries = results.analytics?.backtest?.portfolioValues;
     if (portfolioSeries && portfolioSeries.length > 1) {
       const chartHeight = 140;
       const chartWidth = docWidth - margin * 2;
